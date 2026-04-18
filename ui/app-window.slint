@@ -2,15 +2,49 @@ import { Button, CheckBox, ComboBox, LineEdit, ScrollView } from "std-widgets.sl
 
 export struct BrowseRow { title: string, teaser: string, section: string, source: string, source_label: string, url: string, selected: bool, saved: bool }
 export struct BulkSectionRow { label: string, selected: bool }
-export struct LibraryRow { id: int, title: string, section: string, heading: string, date: string, words: string, url: string, uploaded: bool, selected: bool }
+export struct LibraryRow { id: int, title: string, section: string, heading: string, date: string, words: string, url: string, uploaded: bool, selected: bool, confirming-delete: bool, viewing: bool }
 export struct StatCard { label: string, value: string }
+
+component Panel inherits Rectangle {
+    in property <brush> panel-background: #151c28;
+    in property <brush> panel-border: #263149;
+    background: panel-background;
+    border-color: panel-border;
+    border-width: 1px;
+    border-radius: 12px;
+}
+
+// Small text button for inline actions
+component TextBtn inherits Rectangle {
+    in property <string> label;
+    in property <brush> text-color: #7ea8e0;
+    callback clicked;
+    height: 20px;
+    width: btn-text.preferred-width + 12px;
+    border-radius: 4px;
+    background: ta.has-hover ? #ffffff10 : transparent;
+    btn-text := Text { text: root.label; color: ta.has-hover ? #ffffff : root.text-color; font-size: 11px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+    ta := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+}
+
+// Tiny preset button for date range shortcuts
+component PresetBtn inherits Rectangle {
+    in property <string> label;
+    callback clicked;
+    height: 22px;
+    width: btn-text.preferred-width + 10px;
+    border-radius: 4px;
+    background: ta.has-hover ? #ffffff10 : transparent;
+    btn-text := Text { text: root.label; color: ta.has-hover ? #ccd6e6 : #8190ab; font-size: 10px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+    ta := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+}
 
 export component AppWindow inherits Window {
     title: "taz Reader";
-    preferred-width: 1240px;
-    preferred-height: 780px;
+    preferred-width: 1200px;
+    preferred-height: 760px;
     min-width: 980px;
-    min-height: 640px;
+    min-height: 660px;
     background: #11151d;
 
     in-out property <int> page-index: 0;
@@ -36,9 +70,12 @@ export component AppWindow inherits Window {
     in-out property <bool> lingq-only-not-uploaded: true;
     in-out property <bool> lingq-connected: false;
     in-out property <bool> show-lingq-settings: false;
+    in-out property <bool> show-bulk-sections: false;
+    in property <string> bulk-sections-label: "Sections";
     in-out property <string> lingq-token: "";
     in-out property <string> lingq-username: "";
     in-out property <string> lingq-password: "";
+    in-out property <bool> preview-wide: false;
 
     in property <[string]> browse-section-labels;
     in property <[BrowseRow]> browse-rows;
@@ -60,6 +97,8 @@ export component AppWindow inherits Window {
     in property <string> progress-label: "";
     in property <float> progress-value: 0;
     in property <bool> progress-visible: false;
+    in property <string> browse-count: "";
+    in property <string> library-count: "";
 
     callback switch-page(int);
     callback browse-refresh();
@@ -88,6 +127,9 @@ export component AppWindow inherits Window {
     callback lingq-login();
     callback lingq-refresh-collections();
     callback lingq-disconnect();
+    callback library-search-accepted();
+    callback browse-set-date-preset(int);
+    callback toggle-preview-width();
 
     Rectangle {
         background: #11151d;
@@ -95,72 +137,93 @@ export component AppWindow inherits Window {
         HorizontalLayout {
             spacing: 0px;
 
+            // ── Sidebar ──
             Rectangle {
-                width: 220px;
+                width: 210px;
                 background: #171d29;
                 border-width: 1px;
                 border-color: #273247;
 
                 VerticalLayout {
-                    padding: 24px;
-                    spacing: 16px;
+                    padding: 14px;
+                    spacing: 10px;
 
-                    Rectangle {
-                        height: 76px;
-                        border-radius: 16px;
-                        background: #c61f3f;
+                    Panel {
+                        height: 48px;
+                        panel-background: #c61f3f;
+                        panel-border: #c61f3f;
                         VerticalLayout {
-                            padding: 14px;
+                            padding: 12px;
+                            Text { text: "taz Reader"; color: white; font-size: 19px; font-weight: 800; }
+                        }
+                    }
+
+                    // Browse nav button with badge
+                    Panel {
+                        height: 40px;
+                        panel-background: root.page-index == 0 ? #2c3d5e : (browse-nav-ta.has-hover ? #232e42 : #1b2230);
+                        panel-border: root.page-index == 0 ? #44608e : #1b2230;
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            alignment: center;
+                            Text { text: "Browse"; color: white; horizontal-alignment: left; vertical-alignment: center; font-size: 15px; font-weight: 700; horizontal-stretch: 1; }
+                            if root.browse-count != "" : Rectangle {
+                                width: browse-badge.preferred-width + 12px;
+                                height: 20px;
+                                border-radius: 10px;
+                                background: #2d4a6e;
+                                browse-badge := Text { text: root.browse-count; color: #8fb8e8; font-size: 11px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+                            }
+                        }
+                        browse-nav-ta := TouchArea { mouse-cursor: pointer; clicked => { root.switch-page(0); } }
+                    }
+
+                    // Library nav button with badge
+                    Panel {
+                        height: 40px;
+                        panel-background: root.page-index == 1 ? #2c3d5e : (library-nav-ta.has-hover ? #232e42 : #1b2230);
+                        panel-border: root.page-index == 1 ? #44608e : #1b2230;
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            alignment: center;
+                            Text { text: "Library + LingQ"; color: white; horizontal-alignment: left; vertical-alignment: center; font-size: 15px; font-weight: 700; horizontal-stretch: 1; }
+                            if root.library-count != "" : Rectangle {
+                                width: library-badge.preferred-width + 12px;
+                                height: 20px;
+                                border-radius: 10px;
+                                background: #2d4a6e;
+                                library-badge := Text { text: root.library-count; color: #8fb8e8; font-size: 11px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+                            }
+                        }
+                        library-nav-ta := TouchArea { mouse-cursor: pointer; clicked => { root.switch-page(1); } }
+                    }
+
+                    Panel {
+                        height: 100px;
+                        VerticalLayout {
+                            padding: 10px;
                             spacing: 4px;
-                            Text { text: "taz Reader"; color: white; font-size: 22px; font-weight: 700; }
-                            Text { text: "Slint redesign"; color: #ffd9df; font-size: 15px; }
+                            Text { text: "Status"; color: #8190ab; font-size: 12px; font-weight: 700; }
+                            Text { text: root.status-message; color: #eef4ff; wrap: word-wrap; font-size: 12px; overflow: elide; }
                         }
                     }
 
-                    Rectangle {
-                        height: 52px;
-                        border-radius: 14px;
-                        background: page-index == 0 ? #2c3d5e : #1b2230;
-                        Text { text: "Browse"; color: white; horizontal-alignment: center; vertical-alignment: center; font-size: 18px; font-weight: 700; }
-                        TouchArea { clicked => { root.switch-page(0); } }
-                    }
-
-                    Rectangle {
-                        height: 52px;
-                        border-radius: 14px;
-                        background: page-index == 1 ? #2c3d5e : #1b2230;
-                        Text { text: "Library + LingQ"; color: white; horizontal-alignment: center; vertical-alignment: center; font-size: 17px; font-weight: 700; }
-                        TouchArea { clicked => { root.switch-page(1); } }
-                    }
-
-                    Rectangle {
-                        height: 146px;
-                        border-radius: 16px;
-                        background: #1b2230;
+                    if root.progress-visible : Panel {
+                        height: 56px;
                         VerticalLayout {
-                            padding: 16px;
-                            spacing: 10px;
-                            Text { text: "Status"; color: #8190ab; font-size: 14px; font-weight: 700; }
-                            Text { text: root.status-message; color: #eef4ff; wrap: word-wrap; font-size: 14px; }
-                        }
-                    }
-
-                    Rectangle {
-                        visible: root.progress-visible;
-                        height: root.progress-visible ? 80px : 0px;
-                        border-radius: 16px;
-                        background: #1b2230;
-                        VerticalLayout {
-                            padding: 16px;
-                            spacing: 10px;
-                            Text { text: root.progress-label; color: #eef4ff; font-size: 14px; }
+                            padding: 10px;
+                            spacing: 6px;
+                            Text { text: root.progress-label; color: #eef4ff; font-size: 11px; wrap: word-wrap; overflow: elide; }
                             Rectangle {
-                                height: 10px;
+                                height: 6px;
                                 border-radius: 999px;
                                 background: #273247;
                                 Rectangle {
                                     height: parent.height;
                                     width: parent.width * root.progress-value;
+                                    animate width { duration: 300ms; easing: ease-in-out; }
                                     border-radius: 999px;
                                     background: #5aa0ff;
                                 }
@@ -168,332 +231,359 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    Rectangle { }
+                    Panel {
+                        vertical-stretch: 1;
+                        VerticalLayout {
+                            padding: 10px;
+                            spacing: 4px;
+                            for stat in root.stat-cards : HorizontalLayout {
+                                spacing: 6px;
+                                Text { text: stat.label + ":"; color: #7f8ca7; font-size: 12px; font-weight: 700; }
+                                Text { text: stat.value; color: white; font-size: 12px; font-weight: 800; }
+                            }
+                        }
+                    }
+
                     Button { text: "LingQ Settings"; clicked => { root.lingq-open-settings(); } }
                 }
             }
 
+            // ── Main content area ──
             Rectangle {
                 horizontal-stretch: 1;
                 background: #11151d;
+                clip: true;
 
                 VerticalLayout {
-                    padding: 22px;
-                    spacing: 14px;
+                    padding: 10px;
+                    spacing: 6px;
 
-                    Rectangle {
-                        height: 74px;
-                        border-radius: 18px;
-                        background: #151c28;
-                        border-color: #263149;
-                        border-width: 1px;
-                        HorizontalLayout {
-                            padding: 16px;
-                            spacing: 12px;
-                            for stat in root.stat-cards : Rectangle {
-                                border-radius: 14px;
-                                background: #1d2535;
-                                min-width: 140px;
-                                VerticalLayout {
-                                    padding: 12px;
-                                    spacing: 2px;
-                                    Text { text: stat.label; color: #7f8ca7; font-size: 12px; font-weight: 700; }
-                                    Text { text: stat.value; color: white; font-size: 20px; font-weight: 700; }
-                                }
-                            }
-                        }
-                    }
-
-                    if root.page-index == 0 : Rectangle {
+                    // ════════════════════════════════════
+                    //  BROWSE PAGE
+                    // ════════════════════════════════════
+                    if root.page-index == 0 : VerticalLayout {
+                        spacing: 6px;
                         horizontal-stretch: 1;
                         vertical-stretch: 1;
-                        clip: true;
-                        ScrollView {
-                            width: parent.width;
-                            height: parent.height;
-                            viewport-width: parent.width;
-                            viewport-height: parent.height;
+
+                        // Browse toolbar — single row
+                        Panel {
+                            height: 56px;
+                            clip: true;
                             VerticalLayout {
-                                padding: 0px;
-                                spacing: 14px;
-
-                                Rectangle {
-                                    height: 112px;
-                                    border-radius: 18px;
-                                    background: #151c28;
-                                    border-color: #263149;
-                                    border-width: 1px;
-                                    VerticalLayout {
-                                        padding: 16px;
-                                        spacing: 10px;
-                                        HorizontalLayout {
-                                            spacing: 10px;
-                                            ComboBox { model: root.browse-section-labels; current-index <=> root.browse-section-index; min-width: 220px; }
-                                            CheckBox { text: "Only new"; checked <=> root.browse-only-new; }
-                                            Button { text: "Refresh"; clicked => { root.browse-refresh(); } }
-                                            Button { text: "Load more"; clicked => { root.browse-load-more(); } }
-                                            Button { text: "Select all new"; clicked => { root.browse-select-all-new(); } }
-                                            Button { text: "Clear"; clicked => { root.browse-clear-selection(); } }
-                                            Button { text: "Save selected"; clicked => { root.browse-save-selected(); } }
-                                            Rectangle { }
-                                        }
-                                        Text { text: root.browse-summary; color: #9aa6be; font-size: 15px; }
-                                    }
+                                padding: 8px;
+                                spacing: 2px;
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    ComboBox { model: root.browse-section-labels; current-index <=> root.browse-section-index; min-width: 180px; }
+                                    CheckBox { text: "Only new"; checked <=> root.browse-only-new; }
+                                    Button { text: "Select all"; clicked => { root.browse-select-all-new(); } }
+                                    Button { text: "Clear"; clicked => { root.browse-clear-selection(); } }
+                                    Button { text: "Save selected"; clicked => { root.browse-save-selected(); } }
+                                    Rectangle { }
+                                    Button { text: "Refresh"; clicked => { root.browse-refresh(); } }
+                                    Button { text: "More"; clicked => { root.browse-load-more(); } }
                                 }
-
-                                Rectangle {
-                                    height: 236px;
-                                    border-radius: 18px;
-                                    background: #151c28;
-                                    border-color: #263149;
-                                    border-width: 1px;
-                                    VerticalLayout {
-                                        padding: 16px;
-                                        spacing: 12px;
-                                        Text { text: "Bulk Fetch"; color: white; font-size: 22px; font-weight: 700; }
-                                        Text { text: "Run multi-section fetches within a date window."; color: #9aa6be; wrap: word-wrap; font-size: 15px; }
-                                        HorizontalLayout {
-                                            spacing: 10px;
-                                            LineEdit { text <=> root.browse-date-from; placeholder-text: "From YYYY-MM-DD"; min-width: 160px; }
-                                            LineEdit { text <=> root.browse-date-to; placeholder-text: "To YYYY-MM-DD"; min-width: 160px; }
-                                            LineEdit { text <=> root.bulk-max-articles; placeholder-text: "Max"; min-width: 80px; max-width: 80px; }
-                                            LineEdit { text <=> root.bulk-per-section-cap; placeholder-text: "Per section"; min-width: 100px; max-width: 100px; }
-                                            LineEdit { text <=> root.bulk-stop-after-old; placeholder-text: "Stop after old"; min-width: 120px; }
-                                            Button { text: "Select all"; clicked => { root.browse-bulk-select-all(); } }
-                                            Button { text: "Clear"; clicked => { root.browse-bulk-clear(); } }
-                                            Button { text: "Fetch selected sections"; clicked => { root.browse-run-bulk-fetch(); } }
-                                            Rectangle { }
-                                        }
-                                        Rectangle {
-                                            border-radius: 14px;
-                                            background: #1b2230;
-                                            border-color: #2a3550;
-                                            border-width: 1px;
-                                            clip: true;
-                                            ScrollView {
-                                                width: parent.width;
-                                                height: 116px;
-                                                viewport-width: parent.width;
-                                                viewport-height: parent.height;
-                                                VerticalLayout {
-                                                    padding: 10px;
-                                                    spacing: 8px;
-                                                    for section[index] in root.bulk-section-rows : Rectangle {
-                                                        height: 38px;
-                                                        border-radius: 12px;
-                                                        background: section.selected ? #20324d : #182131;
-                                                        HorizontalLayout {
-                                                            padding: 10px;
-                                                            spacing: 10px;
-                                                            CheckBox { checked: section.selected; toggled => { root.browse-toggle-bulk-section(index); } }
-                                                            Text { text: section.label; color: #eef4ff; vertical-alignment: center; font-size: 15px; }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-
-                                Rectangle {
-                                    border-radius: 18px;
-                                    background: #151c28;
-                                    border-color: #263149;
-                                    border-width: 1px;
-                                    VerticalLayout {
-                                        padding: 14px;
-                                        spacing: 10px;
-                                        for article[index] in root.browse-rows : Rectangle {
-                                            height: 110px;
-                                            border-radius: 16px;
-                                            background: article.selected ? #20324d : #192232;
-                                            border-color: article.selected ? #5aa0ff : #2b364f;
-                                            border-width: 1px;
-                                            HorizontalLayout {
-                                                padding: 14px;
-                                                spacing: 12px;
-                                                CheckBox { checked: article.selected; toggled => { root.browse-toggle-article(index); } }
-                                                VerticalLayout {
-                                                    spacing: 6px;
-                                                    Text { text: article.title; color: white; font-size: 20px; font-weight: 700; wrap: word-wrap; }
-                                                    Text { text: article.section + "  |  " + article.source + "  |  " + (article.saved ? "Saved" : "New"); color: #b8c5dc; font-size: 14px; }
-                                                    Text { text: article.teaser; color: #8f9db7; font-size: 14px; wrap: word-wrap; }
-                                                }
-                                                VerticalLayout {
-                                                    spacing: 8px;
-                                                    Button { text: "Open"; clicked => { root.browse-open-url(article.url); } }
-                                                    Button { text: article.saved ? "Resave" : "Save"; clicked => { root.browse-save-single(article.url); } }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
+                                Text { text: root.browse-summary; color: #9aa6be; font-size: 11px; }
                             }
                         }
-                    }
 
-                    if root.page-index == 1 : Rectangle {
-                        horizontal-stretch: 1;
-                        vertical-stretch: 1;
-                        clip: true;
-                        ScrollView {
-                            width: parent.width;
-                            height: parent.height;
-                            viewport-width: parent.width;
-                            viewport-height: parent.height;
+                        // Bulk Fetch
+                        Panel {
+                            height: root.show-bulk-sections ? 140px : 66px;
+                            clip: true;
                             VerticalLayout {
-                                padding: 0px;
-                                spacing: 14px;
-
-                                Rectangle {
-                                    height: root.show-library-filters ? 144px : 58px;
-                                    border-radius: 18px;
-                                    background: #151c28;
-                                    border-color: #263149;
-                                    border-width: 1px;
-                                    VerticalLayout {
-                                        padding: 16px;
-                                        spacing: 10px;
-                                        HorizontalLayout {
-                                            spacing: 10px;
-                                            Text { text: "Library filters"; color: white; font-size: 20px; font-weight: 700; }
-                                            Rectangle { }
-                                            Button { text: root.show-library-filters ? "Hide" : "Show"; clicked => { root.show-library-filters = !root.show-library-filters; } min-width: 120px; }
-                                        }
-                                        if root.show-library-filters : VerticalLayout {
-                                            spacing: 10px;
-                                            HorizontalLayout {
-                                                spacing: 10px;
-                                                LineEdit { text <=> root.library-search; placeholder-text: "Search titles or text"; min-width: 220px; }
-                                                ComboBox { model: root.heading-labels; current-index <=> root.library-heading-index; min-width: 150px; }
-                                                ComboBox { model: root.section-labels; current-index <=> root.library-section-index; min-width: 160px; }
-                                                ComboBox { model: root.sort-labels; current-index <=> root.library-sort-index; min-width: 130px; }
-                                                CheckBox { text: "Only not uploaded"; checked <=> root.library-only-not-uploaded; }
-                                                Rectangle { }
-                                            }
-                                            HorizontalLayout {
-                                                spacing: 10px;
-                                                LineEdit { text <=> root.library-min-words; placeholder-text: "Min words"; min-width: 110px; max-width: 110px; }
-                                                LineEdit { text <=> root.library-max-words; placeholder-text: "Max words"; min-width: 110px; max-width: 110px; }
-                                                Button { text: "Apply"; clicked => { root.library-apply-filters(); } }
-                                                Rectangle { }
-                                            }
-                                        }
-                                    }
+                                padding: 6px;
+                                padding-left: 10px;
+                                padding-right: 10px;
+                                spacing: 4px;
+                                HorizontalLayout {
+                                    spacing: 5px;
+                                    Text { text: "Bulk"; color: white; font-size: 13px; font-weight: 800; vertical-alignment: center; }
+                                    Text { text: "From"; color: #8190ab; font-size: 11px; vertical-alignment: center; }
+                                    LineEdit { text <=> root.browse-date-from; placeholder-text: "YYYY-MM-DD"; min-width: 100px; max-width: 100px; }
+                                    Text { text: "To"; color: #8190ab; font-size: 11px; vertical-alignment: center; }
+                                    LineEdit { text <=> root.browse-date-to; placeholder-text: "YYYY-MM-DD"; min-width: 100px; max-width: 100px; }
+                                    Text { text: "Max"; color: #8190ab; font-size: 11px; vertical-alignment: center; }
+                                    LineEdit { text <=> root.bulk-max-articles; placeholder-text: "60"; min-width: 40px; max-width: 40px; }
+                                    Text { text: "Per sect"; color: #8190ab; font-size: 11px; vertical-alignment: center; }
+                                    LineEdit { text <=> root.bulk-per-section-cap; placeholder-text: "30"; min-width: 40px; max-width: 40px; }
+                                    Text { text: "Stop after"; color: #8190ab; font-size: 11px; vertical-alignment: center; }
+                                    LineEdit { text <=> root.bulk-stop-after-old; placeholder-text: "12"; min-width: 36px; max-width: 36px; }
+                                    Button { text: root.bulk-sections-label; clicked => { root.show-bulk-sections = !root.show-bulk-sections; } min-width: 100px; }
+                                    Button { text: "All"; clicked => { root.browse-bulk-select-all(); } }
+                                    Button { text: "None"; clicked => { root.browse-bulk-clear(); } }
+                                    Button { text: "Fetch"; clicked => { root.browse-run-bulk-fetch(); } }
+                                    Rectangle { }
                                 }
-
-                                Rectangle {
-                                    height: root.show-upload-tools ? 132px : 58px;
-                                    border-radius: 18px;
-                                    background: #151c28;
-                                    border-color: #263149;
-                                    border-width: 1px;
-                                    VerticalLayout {
-                                        padding: 16px;
-                                        spacing: 10px;
-                                        HorizontalLayout {
-                                            spacing: 10px;
-                                            Text { text: "LingQ upload"; color: white; font-size: 20px; font-weight: 700; }
-                                            Text { text: root.lingq-connected ? "Connected" : "Not connected"; color: root.lingq-connected ? #7ce2a4 : #ffb6c1; font-size: 14px; }
-                                            Rectangle { }
-                                            Button { text: root.show-upload-tools ? "Hide" : "Show"; clicked => { root.show-upload-tools = !root.show-upload-tools; } min-width: 120px; }
-                                            Button { text: "Settings"; clicked => { root.lingq-open-settings(); } min-width: 120px; }
-                                        }
-                                        if root.show-upload-tools : VerticalLayout {
-                                            spacing: 10px;
-                                            HorizontalLayout {
-                                                spacing: 10px;
-                                                ComboBox { model: root.collection-labels; current-index <=> root.lingq-collection-index; min-width: 260px; }
-                                                LineEdit { text <=> root.lingq-min-words; placeholder-text: "Min words"; min-width: 110px; max-width: 110px; }
-                                                LineEdit { text <=> root.lingq-max-words; placeholder-text: "Max words"; min-width: 110px; max-width: 110px; }
-                                                CheckBox { text: "Only not uploaded"; checked <=> root.lingq-only-not-uploaded; }
-                                                Button { text: "Select visible"; clicked => { root.library-select-visible-for-upload(); } }
-                                                Button { text: "Clear"; clicked => { root.library-clear-upload-selection(); } }
-                                                Button { text: "Upload selected"; clicked => { root.library-upload-selected(); } }
-                                                Rectangle { }
-                                            }
-                                        }
-                                    }
+                                // Date preset shortcuts
+                                HorizontalLayout {
+                                    spacing: 4px;
+                                    Text { text: "Quick:"; color: #6b7a94; font-size: 10px; vertical-alignment: center; }
+                                    PresetBtn { label: "7d"; clicked => { root.browse-set-date-preset(0); } }
+                                    PresetBtn { label: "30d"; clicked => { root.browse-set-date-preset(1); } }
+                                    PresetBtn { label: "3mo"; clicked => { root.browse-set-date-preset(2); } }
+                                    PresetBtn { label: "This year"; clicked => { root.browse-set-date-preset(3); } }
+                                    PresetBtn { label: "Last year"; clicked => { root.browse-set-date-preset(4); } }
+                                    Rectangle { }
                                 }
-
-                                Text { text: root.library-summary; color: #9aa6be; font-size: 15px; }
-
-                                Rectangle {
-                                    height: 420px;
-                                    border-radius: 18px;
-                                    background: #151c28;
-                                    border-color: #263149;
-                                    border-width: 1px;
+                                if root.show-bulk-sections : Panel {
+                                    panel-background: #1b2230;
+                                    panel-border: #2a3550;
                                     clip: true;
+                                    vertical-stretch: 1;
                                     ScrollView {
                                         width: parent.width;
                                         height: parent.height;
-                                        viewport-width: parent.width;
-                                        viewport-height: parent.height;
                                         VerticalLayout {
-                                            padding: 14px;
-                                            spacing: 10px;
-                                            for article[index] in root.library-rows : Rectangle {
-                                                height: 96px;
-                                                border-radius: 16px;
-                                                background: article.selected ? #20324d : #192232;
-                                                border-color: article.selected ? #5aa0ff : #2b364f;
-                                                border-width: 1px;
+                                            padding: 4px;
+                                            spacing: 2px;
+                                            for section[index] in root.bulk-section-rows : HorizontalLayout {
+                                                height: 22px;
+                                                padding-left: 6px;
+                                                spacing: 6px;
+                                                CheckBox { checked: section.selected; toggled => { root.browse-toggle-bulk-section(index); } }
+                                                Text { text: section.label; color: #eef4ff; vertical-alignment: center; font-size: 11px; }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Browse article list
+                        Panel {
+                            horizontal-stretch: 1;
+                            vertical-stretch: 1;
+                            clip: true;
+                            ScrollView {
+                                width: parent.width;
+                                height: parent.height;
+                                VerticalLayout {
+                                    padding: 6px;
+                                    spacing: 5px;
+
+                                    // Empty state
+                                    if root.browse-rows.length == 0 : Rectangle {
+                                        height: 80px;
+                                        VerticalLayout {
+                                            alignment: center;
+                                            Text { text: "No articles to show."; color: #6b7a94; font-size: 14px; horizontal-alignment: center; }
+                                            Text { text: "Select a section and click Refresh to browse taz.de."; color: #4e5d76; font-size: 12px; horizontal-alignment: center; }
+                                        }
+                                    }
+
+                                    for article[index] in root.browse-rows : Panel {
+                                        min-height: 72px;
+                                        panel-background: article.selected ? #20324d : #192232;
+                                        panel-border: article.selected ? #5aa0ff : #2b364f;
+                                        border-radius: 8px;
+                                        HorizontalLayout {
+                                            padding: 8px;
+                                            spacing: 8px;
+                                            CheckBox { checked: article.selected; toggled => { root.browse-toggle-article(index); } }
+                                            VerticalLayout {
+                                                horizontal-stretch: 1;
+                                                spacing: 2px;
+                                                // Title row with metadata inline
                                                 HorizontalLayout {
-                                                    padding: 12px;
-                                                    spacing: 12px;
-                                                    CheckBox { checked: article.selected; toggled => { root.library-toggle-select(index); } }
-                                                    Rectangle {
-                                                        VerticalLayout {
-                                                            spacing: 6px;
-                                                            Text { text: article.title; color: white; font-size: 19px; font-weight: 700; wrap: word-wrap; }
-                                                            Text { text: article.section + "  |  " + article.words + " words  |  " + article.date + "  |  " + (article.uploaded ? "On LingQ" : "Not on LingQ"); color: #b8c5dc; font-size: 14px; }
-                                                        }
-                                                        TouchArea { clicked => { root.library-select-article(index); } }
-                                                    }
+                                                    spacing: 8px;
+                                                    Text { text: article.title; color: white; font-size: 14px; font-weight: 750; horizontal-stretch: 1; overflow: elide; }
+                                                    Text { text: article.section; color: #6e8bb5; font-size: 11px; vertical-alignment: center; }
+                                                    Text { text: article.saved ? "Saved" : "New"; color: article.saved ? #7ce2a4 : #ffb6c1; font-size: 11px; vertical-alignment: center; }
+                                                }
+                                                Text { text: article.teaser; color: #8f9db7; font-size: 12px; wrap: word-wrap; }
+                                            }
+                                            // Compact action column
+                                            VerticalLayout {
+                                                spacing: 2px;
+                                                alignment: center;
+                                                TextBtn { label: "Open"; clicked => { root.browse-open-url(article.url); } }
+                                                TextBtn { label: article.saved ? "Resave" : "Save"; clicked => { root.browse-save-single(article.url); } }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // ════════════════════════════════════
+                    //  LIBRARY + LINGQ PAGE
+                    // ════════════════════════════════════
+                    if root.page-index == 1 : VerticalLayout {
+                        spacing: 6px;
+                        horizontal-stretch: 1;
+                        vertical-stretch: 1;
+
+                        // Library filters — always visible, single row
+                        Panel {
+                            height: 38px;
+                            HorizontalLayout {
+                                padding: 6px;
+                                padding-left: 10px;
+                                padding-right: 10px;
+                                spacing: 5px;
+                                Text { text: "Filters"; color: #8190ab; font-size: 12px; font-weight: 700; vertical-alignment: center; }
+                                LineEdit { text <=> root.library-search; placeholder-text: "Search (Enter to apply)"; min-width: 160px; accepted => { root.library-search-accepted(); } }
+                                ComboBox { model: root.heading-labels; current-index <=> root.library-heading-index; min-width: 110px; }
+                                ComboBox { model: root.section-labels; current-index <=> root.library-section-index; min-width: 110px; }
+                                ComboBox { model: root.sort-labels; current-index <=> root.library-sort-index; min-width: 90px; max-width: 90px; }
+                                LineEdit { text <=> root.library-min-words; placeholder-text: "Min words"; min-width: 72px; max-width: 72px; }
+                                LineEdit { text <=> root.library-max-words; placeholder-text: "Max words"; min-width: 72px; max-width: 72px; }
+                                CheckBox { text: "Not uploaded"; checked <=> root.library-only-not-uploaded; }
+                                Button { text: "Apply"; clicked => { root.library-apply-filters(); } }
+                                Rectangle { }
+                            }
+                        }
+
+                        // LingQ upload — always visible, single row
+                        Panel {
+                            height: 38px;
+                            HorizontalLayout {
+                                padding: 6px;
+                                padding-left: 10px;
+                                padding-right: 10px;
+                                spacing: 5px;
+                                Text { text: "LingQ"; color: #8190ab; font-size: 12px; font-weight: 700; vertical-alignment: center; }
+                                Rectangle {
+                                    width: conn-label.preferred-width + 18px;
+                                    height: 20px;
+                                    border-radius: 10px;
+                                    background: root.lingq-connected ? #1a3328 : #33202a;
+                                    conn-label := Text {
+                                        text: root.lingq-connected ? "Connected" : "Disconnected";
+                                        color: root.lingq-connected ? #7ce2a4 : #e06070;
+                                        font-size: 10px;
+                                        font-weight: 600;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                                ComboBox { model: root.collection-labels; current-index <=> root.lingq-collection-index; min-width: 180px; }
+                                LineEdit { text <=> root.lingq-min-words; placeholder-text: "Min words"; min-width: 72px; max-width: 72px; }
+                                LineEdit { text <=> root.lingq-max-words; placeholder-text: "Max words"; min-width: 72px; max-width: 72px; }
+                                CheckBox { text: "Not uploaded"; checked <=> root.lingq-only-not-uploaded; }
+                                Button { text: "Select visible"; clicked => { root.library-select-visible-for-upload(); } }
+                                Button { text: "Clear"; clicked => { root.library-clear-upload-selection(); } }
+                                Button { text: "Upload"; clicked => { root.library-upload-selected(); } }
+                                Rectangle { }
+                                Button { text: "Settings"; clicked => { root.lingq-open-settings(); } min-width: 60px; }
+                            }
+                        }
+
+                        Text { text: root.library-summary; color: #9aa6be; font-size: 11px; }
+
+                        // Library article list + preview split
+                        HorizontalLayout {
+                            horizontal-stretch: 1;
+                            vertical-stretch: 1;
+                            spacing: 6px;
+
+                            // Article list
+                            Panel {
+                                horizontal-stretch: 1;
+                                vertical-stretch: 1;
+                                clip: true;
+                                ScrollView {
+                                    width: parent.width;
+                                    height: parent.height;
+                                    VerticalLayout {
+                                        padding: 6px;
+                                        spacing: 4px;
+
+                                        // Empty state
+                                        if root.library-rows.length == 0 : Rectangle {
+                                            height: 80px;
+                                            VerticalLayout {
+                                                alignment: center;
+                                                Text { text: "No saved articles."; color: #6b7a94; font-size: 14px; horizontal-alignment: center; }
+                                                Text { text: "Browse and save articles from the Browse page."; color: #4e5d76; font-size: 12px; horizontal-alignment: center; }
+                                            }
+                                        }
+
+                                        for article[index] in root.library-rows : Panel {
+                                            min-height: 48px;
+                                            panel-background: article.viewing ? #1e2f4a : (article.selected ? #20324d : #192232);
+                                            panel-border: article.viewing ? #4488cc : (article.selected ? #5aa0ff : #2b364f);
+                                            border-radius: 8px;
+                                            HorizontalLayout {
+                                                padding: 6px;
+                                                spacing: 6px;
+                                                // Viewing accent bar
+                                                if article.viewing : Rectangle {
+                                                    width: 3px;
+                                                    border-radius: 2px;
+                                                    background: #5aa0ff;
+                                                }
+                                                CheckBox { checked: article.selected; toggled => { root.library-toggle-select(index); } }
+                                                Rectangle {
+                                                    horizontal-stretch: 1;
                                                     VerticalLayout {
-                                                        spacing: 8px;
-                                                        Button { text: "Original"; clicked => { root.library-open-url(article.url); } }
-                                                        Button { text: "Delete"; clicked => { root.library-delete-article(index); } }
+                                                        spacing: 1px;
+                                                        HorizontalLayout {
+                                                            spacing: 8px;
+                                                            Text { text: article.title; color: white; font-size: 13px; font-weight: 760; horizontal-stretch: 1; overflow: elide; }
+                                                            Text { text: article.words + "w"; color: #6e8bb5; font-size: 11px; vertical-alignment: center; }
+                                                            Text { text: article.date; color: #6e8bb5; font-size: 11px; vertical-alignment: center; }
+                                                            Text { text: article.uploaded ? "LingQ" : "Local"; color: article.uploaded ? #7ce2a4 : #9aa6be; font-size: 11px; vertical-alignment: center; }
+                                                        }
+                                                        Text { text: article.section; color: #6e8bb5; font-size: 11px; }
+                                                    }
+                                                    TouchArea { mouse-cursor: pointer; clicked => { root.library-select-article(index); } }
+                                                }
+                                                // Compact inline actions
+                                                VerticalLayout {
+                                                    spacing: 1px;
+                                                    alignment: center;
+                                                    TextBtn { label: "Open"; clicked => { root.library-open-url(article.url); } }
+                                                    TextBtn {
+                                                        label: article.confirming-delete ? "Sure?" : "Delete";
+                                                        text-color: article.confirming-delete ? #ff4455 : #e06070;
+                                                        clicked => { root.library-delete-article(index); }
                                                     }
                                                 }
                                             }
                                         }
                                     }
                                 }
+                            }
 
-                                Rectangle {
-                                    height: 320px;
-                                    border-radius: 18px;
-                                    background: #151c28;
-                                    border-color: #263149;
-                                    border-width: 1px;
-                                    clip: true;
-                                    VerticalLayout {
-                                        padding: 16px;
-                                        spacing: 12px;
-                                        Text { text: root.preview-has-article ? root.preview-title : "Reading pane"; color: white; font-size: 24px; font-weight: 700; wrap: word-wrap; }
-                                        Text { text: root.preview-has-article ? root.preview-meta : "Select a saved article to preview its cleaned LingQ upload text."; color: #9aa6be; wrap: word-wrap; font-size: 15px; }
-                                        if root.preview-has-article : Button { text: "Open original article"; clicked => { root.library-open-url(root.preview-url); } }
-                                        Rectangle {
-                                            border-radius: 14px;
-                                            background: #1b2230;
-                                            border-color: #2a3550;
-                                            border-width: 1px;
-                                            clip: true;
-                                            ScrollView {
-                                                width: parent.width;
-                                                height: 200px;
-                                                viewport-width: parent.width;
-                                                viewport-height: parent.height;
+                            // Preview pane
+                            Panel {
+                                width: root.preview-wide ? 520px : 380px;
+                                animate width { duration: 200ms; easing: ease-in-out; }
+                                vertical-stretch: 1;
+                                VerticalLayout {
+                                    padding: 10px;
+                                    spacing: 6px;
+                                    HorizontalLayout {
+                                        spacing: 6px;
+                                        Text { text: root.preview-has-article ? root.preview-title : "Reading pane"; color: white; font-size: 16px; font-weight: 800; wrap: word-wrap; horizontal-stretch: 1; }
+                                        TextBtn {
+                                            label: root.preview-wide ? "Narrow" : "Wide";
+                                            text-color: #6b7a94;
+                                            clicked => { root.toggle-preview-width(); }
+                                        }
+                                    }
+                                    Text { text: root.preview-has-article ? root.preview-meta : "Select a saved article to preview."; color: #9aa6be; wrap: word-wrap; font-size: 12px; }
+                                    if root.preview-has-article : Button { text: "Open original"; clicked => { root.library-open-url(root.preview-url); } max-width: 140px; }
+                                    Panel {
+                                        panel-background: #1b2230;
+                                        panel-border: #2a3550;
+                                        vertical-stretch: 1;
+                                        clip: true;
+                                        ScrollView {
+                                            width: parent.width;
+                                            height: parent.height;
+                                            viewport-width: self.width;
+                                            VerticalLayout {
+                                                padding: 10px;
                                                 Text {
-                                                    x: 16px;
-                                                    y: 16px;
-                                                    width: parent.width - 32px;
                                                     text: root.preview-body;
                                                     color: #eef4ff;
                                                     wrap: word-wrap;
-                                                    font-size: 16px;
+                                                    font-size: 13px;
                                                 }
                                             }
                                         }
@@ -506,39 +596,44 @@ export component AppWindow inherits Window {
             }
         }
 
+        // ── LingQ Settings Modal ──
         if root.show-lingq-settings : Rectangle {
             background: #00000088;
+            // Backdrop click-to-close
+            TouchArea {
+                clicked => { root.lingq-close-settings(); }
+            }
             HorizontalLayout {
                 Rectangle { }
-                Rectangle {
-                    width: 520px;
-                    height: 520px;
-                    y: 64px;
-                    border-radius: 22px;
-                    background: #182131;
-                    border-color: #2d3a56;
-                    border-width: 1px;
+                Panel {
+                    width: 480px;
+                    height: 460px;
+                    y: 48px;
+                    panel-background: #182131;
+                    panel-border: #2d3a56;
+                    // Block clicks from propagating to backdrop
+                    TouchArea { }
                     VerticalLayout {
-                        padding: 22px;
-                        spacing: 14px;
+                        padding: 18px;
+                        spacing: 10px;
                         HorizontalLayout {
-                            Text { text: "LingQ Settings"; color: white; font-size: 26px; font-weight: 700; }
+                            Text { text: "LingQ Settings"; color: white; font-size: 22px; font-weight: 800; }
                             Rectangle { }
                             Button { text: "Close"; clicked => { root.lingq-close-settings(); } }
                         }
-                        Text { text: "Use a token or log in with your LingQ account to refresh courses."; color: #9aa6be; wrap: word-wrap; font-size: 15px; }
-                        Text { text: "API token"; color: #d6e0f2; }
+                        Text { text: "Use a token or log in with your LingQ account to refresh courses."; color: #9aa6be; wrap: word-wrap; font-size: 13px; }
+                        Text { text: "API token"; color: #d6e0f2; font-size: 13px; }
                         LineEdit { text <=> root.lingq-token; }
                         HorizontalLayout {
-                            spacing: 10px;
+                            spacing: 8px;
                             Button { text: "Save token"; clicked => { root.lingq-save-token(); } }
                             Button { text: "Refresh courses"; clicked => { root.lingq-refresh-collections(); } }
                             Button { text: "Disconnect"; clicked => { root.lingq-disconnect(); } }
                         }
                         Rectangle { height: 1px; background: #2d3a56; }
-                        Text { text: "Username or email"; color: #d6e0f2; }
+                        Text { text: "Username or email"; color: #d6e0f2; font-size: 13px; }
                         LineEdit { text <=> root.lingq-username; }
-                        Text { text: "Password"; color: #d6e0f2; }
+                        Text { text: "Password"; color: #d6e0f2; font-size: 13px; }
                         LineEdit { text <=> root.lingq-password; input-type: password; }
                         Button { text: "Log in and save token"; clicked => { root.lingq-login(); } }
                     }

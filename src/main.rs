@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use anyhow::{Context, Result, anyhow};
 use clap::{Args, Parser, Subcommand};
 use taz_lingq_tool::{
