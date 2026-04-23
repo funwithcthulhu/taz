@@ -2,7 +2,7 @@
 
 Desktop app and CLI for discovering articles from `taz.de`, saving them into a local library, and uploading selected texts to LingQ.
 
-This project started as a Rust replacement for `zeit_lingq_tool`, but it now has its own Windows-native workflow:
+This project is a Windows-native workflow for reading, saving, and uploading `taz.de` articles:
 
 - Slint desktop GUI
 - async `taz.de` article discovery and extraction
