@@ -1,0 +1,3 @@
+// Windows application icon — embedded into the .exe
+// The icon with the lowest ID becomes the default app icon
+1 ICON "taz.ico"

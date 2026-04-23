@@ -1,14 +1,74 @@
 use anyhow::{Context, Result, bail};
+use log::{debug, info, warn};
 use regex::Regex;
-use reqwest::{StatusCode, blocking::Client};
+use reqwest::{Client, StatusCode};
 use scraper::{ElementRef, Html, Selector};
 use std::{
     collections::{HashSet, VecDeque},
+    sync::LazyLock,
     time::Duration,
 };
 
 const BASE_URL: &str = "https://taz.de";
 const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36";
+
+/// ── Parsed CSS selectors (cached via LazyLock) ─────────────────────────────
+/// These are parsed once on first use and reused for every scrape call.
+mod parsed {
+    use super::*;
+    pub static LINKS: LazyLock<Selector> =
+        LazyLock::new(|| Selector::parse(super::selectors::LINKS).unwrap());
+    pub static ARTICLE: LazyLock<Selector> =
+        LazyLock::new(|| Selector::parse(super::selectors::ARTICLE).unwrap());
+    pub static BODY_ELEMENTS: LazyLock<Selector> =
+        LazyLock::new(|| Selector::parse(super::selectors::BODY_ELEMENTS).unwrap());
+    pub static BODY_FALLBACK: LazyLock<Selector> =
+        LazyLock::new(|| Selector::parse(super::selectors::BODY_FALLBACK).unwrap());
+    pub static HEADLINE: LazyLock<Vec<Selector>> = LazyLock::new(|| {
+        super::selectors::HEADLINE
+            .iter()
+            .filter_map(|s| Selector::parse(s).ok())
+            .collect()
+    });
+}
+
+/// ── CSS selectors for taz.de article extraction ────────────────────────────
+/// Centralised here so they're easy to audit and update when the site redesigns.
+mod selectors {
+    // Article metadata
+    pub const TITLE: &[&str] = &["h1", "meta[property=\"og:title\"]", "title"];
+    pub const SUBTITLE: &[&str] = &["meta[name=\"description\"]"];
+    pub const AUTHOR: &[&str] = &["meta[property=\"article:author\"]"];
+    pub const AUTHOR_FALLBACK: &[&str] = &["[rel=\"author\"]", ".author", "[class*=\"author\"]"];
+    pub const SECTION: &[&str] = &["meta[property=\"article:section\"]"];
+    pub const DATE_TIME: &[&str] = &["time[datetime]"];
+    pub const DATE_META: &[&str] = &[
+        "meta[property=\"article:published_time\"]",
+        "meta[name=\"date\"]",
+    ];
+
+    // Article body extraction
+    pub const ARTICLE: &str = "article";
+    pub const BODY_ELEMENTS: &str = "p, h2, h3, li";
+    pub const BODY_FALLBACK: &str = "main p";
+
+    // Link discovery
+    pub const LINKS: &str = "a[href]";
+
+    // Browse page headline extraction
+    pub const HEADLINE: &[&str] = &[".headline", "h1", "h2", "h3"];
+
+    // Donate / boilerplate markers to strip from body text
+    pub const DONATE_MARKERS: &[&str] = &[
+        "Gemeinsam für freie Presse",
+        "Jetzt unterstützen",
+        "Diesen Artikel teilen",
+        "Feedback",
+        "Leser*innenkommentar",
+        "Fehlerhinweis",
+        "Mehr zum Thema",
+    ];
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct Section {
@@ -32,6 +92,7 @@ pub enum DiscoverySourceKind {
     Section,
     Subsection,
     Topic,
+    Search,
 }
 
 impl DiscoverySourceKind {
@@ -40,6 +101,7 @@ impl DiscoverySourceKind {
             Self::Section => "section",
             Self::Subsection => "subsection",
             Self::Topic => "topic",
+            Self::Search => "search",
         }
     }
 }
@@ -63,6 +125,7 @@ impl DiscoveryReport {
             DiscoverySourceKind::Section => self.section_pages_visited += 1,
             DiscoverySourceKind::Subsection => self.subsection_pages_visited += 1,
             DiscoverySourceKind::Topic => self.topic_pages_visited += 1,
+            DiscoverySourceKind::Search => {}
         }
     }
 
@@ -71,6 +134,7 @@ impl DiscoveryReport {
             DiscoverySourceKind::Section => self.section_articles += 1,
             DiscoverySourceKind::Subsection => self.subsection_articles += 1,
             DiscoverySourceKind::Topic => self.topic_articles += 1,
+            DiscoverySourceKind::Search => {}
         }
     }
 }
@@ -92,6 +156,7 @@ pub struct Article {
     pub body_text: String,
     pub clean_text: String,
     pub word_count: usize,
+    pub difficulty: i64,
     pub fetched_at: String,
 }
 
@@ -316,6 +381,7 @@ pub const SECTIONS: &[Section] = &[
     },
 ];
 
+#[derive(Clone)]
 pub struct TazClient {
     client: Client,
     article_url_re: Regex,
@@ -326,10 +392,12 @@ impl TazClient {
     pub fn new() -> Result<Self> {
         let client = Client::builder()
             .user_agent(USER_AGENT)
+            .timeout(std::time::Duration::from_secs(30))
+            .connect_timeout(std::time::Duration::from_secs(10))
             .build()
             .context("failed to build HTTP client")?;
         let article_url_re =
-            Regex::new(r"^https://taz\.de/(?:[^/]+/)?(?:%21|!)\d+/??$").context("bad regex")?;
+            Regex::new(r"^https://taz\.de/(?:[^/]+/)*(?:%21|!)\d+/??$").context("bad regex")?;
         let topic_url_re =
             Regex::new(r"^https://taz\.de/.*/(?:%21|!)t\d+/??$").context("bad topic regex")?;
 
@@ -348,11 +416,11 @@ impl TazClient {
         SECTIONS.iter().find(|section| section.id == id)
     }
 
-    pub fn browse_section(&self, section: &Section, limit: usize) -> Result<Vec<ArticleSummary>> {
-        Ok(self.browse_section_detailed(section, limit)?.articles)
+    pub async fn browse_section(&self, section: &Section, limit: usize) -> Result<Vec<ArticleSummary>> {
+        Ok(self.browse_section_detailed(section, limit).await?.articles)
     }
 
-    pub fn browse_section_detailed(
+    pub async fn browse_section_detailed(
         &self,
         section: &Section,
         limit: usize,
@@ -361,7 +429,8 @@ impl TazClient {
         let mut seen_articles = HashSet::new();
         let mut queued_sources = VecDeque::new();
         let mut seen_sources = HashSet::new();
-        let max_sources = limit.max(80).div_ceil(20).clamp(8, 28);
+        let subsection_count = self.related_sections(section).len();
+        let max_sources = (limit.max(80).div_ceil(20) + subsection_count).clamp(12, 40);
         let mut report = DiscoveryReport {
             source_pages_visited: 0,
             section_pages_visited: 0,
@@ -394,7 +463,7 @@ impl TazClient {
                 break;
             }
 
-            let html = self.fetch_html(&source_url)?;
+            let html = self.fetch_html(&source_url).await?;
             let document = Html::parse_document(&html);
             report.record_source_visit(source_kind);
 
@@ -427,13 +496,13 @@ impl TazClient {
         Ok(BrowseSectionResult { articles, report })
     }
 
-    pub fn browse_url(
+    pub async fn browse_url(
         &self,
         url: &str,
         fallback_section: Option<&str>,
         limit: usize,
     ) -> Result<Vec<ArticleSummary>> {
-        let html = self.fetch_html(url)?;
+        let html = self.fetch_html(url).await?;
         let document = Html::parse_document(&html);
         let mut articles = Vec::new();
         let mut seen = HashSet::new();
@@ -460,11 +529,12 @@ impl TazClient {
         Ok(articles)
     }
 
-    pub fn fetch_article(&self, url: &str) -> Result<Article> {
-        let html = self.fetch_html(url)?;
+    pub async fn fetch_article(&self, url: &str) -> Result<Article> {
+        info!("Fetching article: {url}");
+        let html = self.fetch_html(url).await?;
         let document = Html::parse_document(&html);
 
-        let title = first_text(&document, &["h1", "meta[property=\"og:title\"]", "title"])
+        let title = first_text(&document, selectors::TITLE)
             .map(|value| {
                 value
                     .replace(" | taz.de", "")
@@ -476,24 +546,19 @@ impl TazClient {
             .unwrap_or_else(|| "Untitled".to_owned());
 
         let subtitle =
-            first_attr(&document, &["meta[name=\"description\"]"], "content").unwrap_or_default();
+            first_attr(&document, selectors::SUBTITLE, "content").unwrap_or_default();
 
-        let author = first_attr(&document, &["meta[property=\"article:author\"]"], "content")
+        let author = first_attr(&document, selectors::AUTHOR, "content")
             .or_else(|| {
-                first_text(
-                    &document,
-                    &["[rel=\"author\"]", ".author", "[class*=\"author\"]"],
-                )
+                first_text(&document, selectors::AUTHOR_FALLBACK)
             })
             .unwrap_or_default();
 
-        let date = extract_date(&document, &html, url).unwrap_or_default();
+        let date = extract_date(&document, &html, url)
+            .map(|d| normalize_date(&d))
+            .unwrap_or_default();
 
-        let section = first_attr(
-            &document,
-            &["meta[property=\"article:section\"]"],
-            "content",
-        )
+        let section = first_attr(&document, selectors::SECTION, "content")
         .or_else(|| extract_section_from_html(&html))
         .unwrap_or_else(|| infer_section_from_url(url));
 
@@ -504,6 +569,7 @@ impl TazClient {
         }
 
         let clean_text = build_clean_text(&title, &subtitle, &author, &date, &body_text);
+        let difficulty = estimate_difficulty(&body_text);
 
         Ok(Article {
             url: url.to_owned(),
@@ -515,15 +581,16 @@ impl TazClient {
             body_text,
             clean_text,
             word_count,
+            difficulty,
             fetched_at: iso_timestamp_now(),
         })
     }
 
-    pub fn fetch_article_metadata(&self, url: &str) -> Result<ArticleMetadata> {
-        let html = self.fetch_html(url)?;
+    pub async fn fetch_article_metadata(&self, url: &str) -> Result<ArticleMetadata> {
+        let html = self.fetch_html(url).await?;
         let document = Html::parse_document(&html);
 
-        let title = first_text(&document, &["h1", "meta[property=\"og:title\"]", "title"])
+        let title = first_text(&document, selectors::TITLE)
             .map(|value| {
                 value
                     .replace(" | taz.de", "")
@@ -534,12 +601,10 @@ impl TazClient {
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| "Untitled".to_owned());
 
-        let date = extract_date(&document, &html, url).unwrap_or_default();
-        let section = first_attr(
-            &document,
-            &["meta[property=\"article:section\"]"],
-            "content",
-        )
+        let date = extract_date(&document, &html, url)
+            .map(|d| normalize_date(&d))
+            .unwrap_or_default();
+        let section = first_attr(&document, selectors::SECTION, "content")
         .or_else(|| extract_section_from_html(&html))
         .unwrap_or_else(|| infer_section_from_url(url));
 
@@ -551,20 +616,24 @@ impl TazClient {
         })
     }
 
-    fn fetch_html(&self, url: &str) -> Result<String> {
+    async fn fetch_html(&self, url: &str) -> Result<String> {
         let mut last_error = None;
 
         for attempt in 1..=3 {
-            match self.client.get(url).send() {
+            debug!("HTTP GET {url} (attempt {attempt})");
+            match self.client.get(url).send().await {
                 Ok(response) => {
                     let status = response.status();
                     if status.is_success() {
+                        debug!("HTTP {status} for {url}");
                         return response
                             .text()
+                            .await
                             .with_context(|| format!("network: failed to read body for {url}"));
                     }
 
                     let retryable = is_retryable_status(status);
+                    warn!("HTTP {status} for {url} (retryable={retryable}, attempt={attempt})");
                     last_error = Some(anyhow::anyhow!(
                         "network: non-success response {} for {}",
                         status,
@@ -575,6 +644,7 @@ impl TazClient {
                     }
                 }
                 Err(err) => {
+                    warn!("HTTP request failed for {url}: {err} (attempt {attempt})");
                     last_error = Some(anyhow::anyhow!("network: request failed for {url}: {err}"));
                     if attempt == 3 {
                         break;
@@ -582,7 +652,7 @@ impl TazClient {
                 }
             }
 
-            std::thread::sleep(Duration::from_millis(450 * attempt as u64));
+            tokio::time::sleep(Duration::from_millis(450 * attempt as u64)).await;
         }
 
         Err(last_error.unwrap_or_else(|| anyhow::anyhow!("network: failed to fetch {url}")))
@@ -599,7 +669,7 @@ impl TazClient {
         articles: &mut Vec<ArticleSummary>,
         report: &mut DiscoveryReport,
     ) {
-        let selector = Selector::parse("a[href]").expect("selector");
+        let selector = parsed::LINKS.clone();
 
         for link in document.select(&selector) {
             let Some(raw_href) = link.value().attr("href") else {
@@ -642,7 +712,7 @@ impl TazClient {
     }
 
     fn extract_topic_urls(&self, document: &Html) -> Vec<String> {
-        let selector = Selector::parse("a[href]").expect("selector");
+        let selector = parsed::LINKS.clone();
         let mut urls = Vec::new();
         let mut seen = HashSet::new();
 
@@ -699,7 +769,6 @@ impl TazClient {
     }
 
     fn extract_browse_title(&self, link: ElementRef<'_>) -> String {
-        let headline_selectors = [".headline", "h1", "h2", "h3"];
         let mut parent = link.parent();
 
         for _ in 0..2 {
@@ -708,10 +777,9 @@ impl TazClient {
             };
 
             if let Some(element) = ElementRef::wrap(node) {
-                for selector in headline_selectors {
-                    let selector = Selector::parse(selector).expect("selector");
+                for selector in parsed::HEADLINE.iter() {
                     if let Some(candidate) = element
-                        .select(&selector)
+                        .select(selector)
                         .map(collect_text)
                         .map(|text| clean_whitespace(&text))
                         .find(|text| looks_like_article_title(text))
@@ -726,6 +794,93 @@ impl TazClient {
 
         clean_whitespace(&collect_text(link))
     }
+
+    pub async fn search_articles(
+        &self,
+        query: &str,
+        max_pages: usize,
+    ) -> Result<Vec<ArticleSummary>> {
+        if query.trim().is_empty() {
+            bail!("search query is empty");
+        }
+
+        let encoded_query = urlencoding::encode(query.trim());
+        let mut articles = Vec::new();
+        let mut seen = HashSet::new();
+        let selector = parsed::LINKS.clone();
+
+        for page in 0..max_pages {
+            let url = if page == 0 {
+                format!("{BASE_URL}/!s={encoded_query}/")
+            } else {
+                format!(
+                    "{BASE_URL}/!s={encoded_query}/?search_page={page}"
+                )
+            };
+
+            let html = self.fetch_html(&url).await?;
+            let document = Html::parse_document(&html);
+            let mut page_count = 0;
+
+            for link in document.select(&selector) {
+                let Some(raw_href) = link.value().attr("href") else {
+                    continue;
+                };
+
+                let raw_url = absolute_url(raw_href);
+                // Search result URLs have &s=Query suffix — strip it
+                let article_url = strip_search_suffix(&raw_url);
+
+                if !self.article_url_re.is_match(&article_url) {
+                    continue;
+                }
+                if !seen.insert(article_url.clone()) {
+                    continue;
+                }
+
+                let title = self.extract_browse_title(link);
+                if !looks_like_article_title(&title) {
+                    continue;
+                }
+
+                let teaser = self.extract_teaser(link);
+                let section = infer_section_from_url(&article_url);
+
+                articles.push(ArticleSummary {
+                    url: article_url,
+                    title,
+                    teaser,
+                    section,
+                    source_kind: DiscoverySourceKind::Search,
+                    source_label: format!("search: {query}"),
+                });
+                page_count += 1;
+            }
+
+            // If a page yielded no articles, we've exhausted results
+            if page_count == 0 {
+                break;
+            }
+        }
+
+        Ok(articles)
+    }
+}
+
+fn strip_search_suffix(url: &str) -> String {
+    // Search result URLs look like: https://taz.de/Title/!123456&s=Query/
+    // Strip the &s=... portion to get the clean article URL
+    if let Some(pos) = url.find("&s=") {
+        let before = &url[..pos];
+        // Preserve trailing slash if present after the &s=... part
+        if url.ends_with('/') {
+            format!("{before}/")
+        } else {
+            before.to_owned()
+        }
+    } else {
+        url.to_owned()
+    }
 }
 
 fn is_retryable_status(status: StatusCode) -> bool {
@@ -737,17 +892,9 @@ fn is_retryable_status(status: StatusCode) -> bool {
 }
 
 fn extract_body(document: &Html) -> Result<String> {
-    let article_selector = Selector::parse("article").expect("selector");
-    let paragraph_selector = Selector::parse("p, h2, h3, li").expect("selector");
-    let donate_markers = [
-        "Gemeinsam für freie Presse",
-        "Jetzt unterstützen",
-        "Diesen Artikel teilen",
-        "Feedback",
-        "Leser*innenkommentar",
-        "Fehlerhinweis",
-        "Mehr zum Thema",
-    ];
+    let article_selector = parsed::ARTICLE.clone();
+    let paragraph_selector = parsed::BODY_ELEMENTS.clone();
+    let donate_markers = selectors::DONATE_MARKERS;
 
     let mut best_blocks = Vec::new();
 
@@ -775,7 +922,7 @@ fn extract_body(document: &Html) -> Result<String> {
     }
 
     if best_blocks.is_empty() {
-        let fallback_selector = Selector::parse("main p").expect("selector");
+        let fallback_selector = parsed::BODY_FALLBACK.clone();
         for node in document.select(&fallback_selector) {
             let text = clean_whitespace(&collect_text(node));
             if text.len() >= 45 {
@@ -801,48 +948,47 @@ fn dedupe_lines(lines: &mut Vec<String>) {
     });
 }
 
+static RE_SECTION: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"cp:\s*"Redaktion/([^/",]+)"#).expect("section regex"));
+
 fn extract_section_from_html(html: &str) -> Option<String> {
-    let cp_re = Regex::new(r#"cp:\s*"Redaktion/([^/",]+)"#).ok()?;
-    cp_re
+    RE_SECTION
         .captures(html)
         .and_then(|captures| captures.get(1))
         .map(|value| clean_whitespace(value.as_str()))
 }
 
 fn extract_date(document: &Html, html: &str, url: &str) -> Option<String> {
-    first_attr(document, &["time[datetime]"], "datetime")
-        .or_else(|| {
-            first_attr(
-                document,
-                &[
-                    "meta[property=\"article:published_time\"]",
-                    "meta[name=\"date\"]",
-                ],
-                "content",
-            )
-        })
+    first_attr(document, selectors::DATE_TIME, "datetime")
+        .or_else(|| first_attr(document, selectors::DATE_META, "content"))
         .or_else(|| extract_date_from_json_ld(html))
         .or_else(|| extract_date_from_text(html))
         .or_else(|| extract_date_from_url(url))
 }
 
+static RE_DATE_JSON_LD: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#""datePublished"\s*:\s*"([^"]+)""#).expect("json-ld date regex"));
+static RE_DATE_TEXT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b(\d{1,2}\.\d{1,2}\.\d{4})\b").expect("text date regex"));
+static RE_DATE_URL: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"/(\d{4})/(\d{2})/(\d{2})/").expect("url date regex"));
+
 fn extract_date_from_json_ld(html: &str) -> Option<String> {
-    let re = Regex::new(r#""datePublished"\s*:\s*"([^"]+)""#).ok()?;
-    re.captures(html)
+    RE_DATE_JSON_LD
+        .captures(html)
         .and_then(|captures| captures.get(1))
         .map(|value| clean_whitespace(value.as_str()))
 }
 
 fn extract_date_from_text(html: &str) -> Option<String> {
-    let re = Regex::new(r"\b(\d{1,2}\.\d{1,2}\.\d{4})\b").ok()?;
-    re.captures(html)
+    RE_DATE_TEXT
+        .captures(html)
         .and_then(|captures| captures.get(1))
         .map(|value| value.as_str().to_owned())
 }
 
 fn extract_date_from_url(url: &str) -> Option<String> {
-    let re = Regex::new(r"/(\d{4})/(\d{2})/(\d{2})/").ok()?;
-    let captures = re.captures(url)?;
+    let captures = RE_DATE_URL.captures(url)?;
     Some(format!(
         "{}-{}-{}",
         captures.get(1)?.as_str(),
@@ -1072,6 +1218,19 @@ fn collect_text(node: ElementRef<'_>) -> String {
     node.text().collect::<Vec<_>>().join("")
 }
 
+static RE_PUNCTUATION: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\s+([,;:.!?)])").expect("punctuation regex"));
+static RE_OPENING: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"([(\[])\s+").expect("opening punctuation regex"));
+static RE_QUOTE_SPACING: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"([–—-])(["„‚»])"#).expect("dash quote spacing regex"));
+static RE_QUOTE_OPENING: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"(["„‚«])\s+"#).expect("quote opening spacing regex"));
+static RE_SPLIT_WORD: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b([A-Za-zÄÖÜäöüß]) ([a-zäöüß]{2,})\b").expect("split word regex"));
+static RE_TAG: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"<[^>]+>").expect("tag regex"));
+
 fn clean_whitespace(input: &str) -> String {
     let cleaned = input
         .replace(
@@ -1084,23 +1243,15 @@ fn clean_whitespace(input: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ");
 
-    let punctuation_re = Regex::new(r"\s+([,;:.!?)])").expect("punctuation regex");
-    let opening_re = Regex::new(r"([(\[])\s+").expect("opening punctuation regex");
-    let quote_spacing_re = Regex::new(r#"([–—-])(["„‚»])"#).expect("dash quote spacing regex");
-    let quote_opening_re = Regex::new(r#"(["„‚«])\s+"#).expect("quote opening spacing regex");
-    let split_word_re =
-        Regex::new(r"\b([A-Za-zÄÖÜäöüß]) ([a-zäöüß]{2,})\b").expect("split word regex");
-
-    let cleaned = punctuation_re.replace_all(&cleaned, "$1").into_owned();
-    let cleaned = opening_re.replace_all(&cleaned, "$1").into_owned();
-    let cleaned = quote_spacing_re.replace_all(&cleaned, "$1 $2").into_owned();
-    let cleaned = quote_opening_re.replace_all(&cleaned, "$1").into_owned();
-    split_word_re.replace_all(&cleaned, "$1$2").into_owned()
+    let cleaned = RE_PUNCTUATION.replace_all(&cleaned, "$1").into_owned();
+    let cleaned = RE_OPENING.replace_all(&cleaned, "$1").into_owned();
+    let cleaned = RE_QUOTE_SPACING.replace_all(&cleaned, "$1 $2").into_owned();
+    let cleaned = RE_QUOTE_OPENING.replace_all(&cleaned, "$1").into_owned();
+    RE_SPLIT_WORD.replace_all(&cleaned, "$1$2").into_owned()
 }
 
 fn strip_markup(input: &str) -> String {
-    let tag_re = Regex::new(r"<[^>]+>").expect("tag regex");
-    clean_whitespace(&tag_re.replace_all(input, " "))
+    clean_whitespace(&RE_TAG.replace_all(input, " "))
 }
 
 fn trim_chars(input: &str, max: usize) -> String {
@@ -1108,11 +1259,176 @@ fn trim_chars(input: &str, max: usize) -> String {
 }
 
 fn iso_timestamp_now() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
+    chrono::Utc::now().to_rfc3339()
+}
 
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    now.to_string()
+/// Normalize a date string from any taz.de format into YYYY-MM-DD.
+/// Handles ISO timestamps (2025-03-24T10:00:00+01:00), German dates (24.3.2025),
+/// and plain YYYY-MM-DD. Returns the original string if parsing fails.
+fn normalize_date(input: &str) -> String {
+    let trimmed = input.trim();
+    // Try YYYY-MM-DD (already normalized)
+    if chrono::NaiveDate::parse_from_str(trimmed, "%Y-%m-%d").is_ok() && trimmed.len() == 10 {
+        return trimmed.to_owned();
+    }
+    // Try ISO timestamp prefix (first 10 chars = YYYY-MM-DD)
+    if trimmed.len() >= 10 {
+        if let Ok(date) = chrono::NaiveDate::parse_from_str(&trimmed[..10], "%Y-%m-%d") {
+            return date.format("%Y-%m-%d").to_string();
+        }
+    }
+    // Try German date format (d.m.YYYY or dd.mm.YYYY)
+    if let Ok(date) = chrono::NaiveDate::parse_from_str(trimmed, "%d.%m.%Y") {
+        return date.format("%Y-%m-%d").to_string();
+    }
+    // Fallback: return as-is
+    trimmed.to_owned()
+}
+
+/// Estimate article reading difficulty on a 1-5 scale for German text.
+///
+/// Heuristics used:
+/// - Average sentence length (words per sentence)
+/// - Average word length (characters per word)
+/// - Proportion of long words (>= 10 chars, common in German compounds)
+///
+/// Returns a score from 1 (easiest) to 5 (hardest).
+pub fn estimate_difficulty(body_text: &str) -> i64 {
+    let words: Vec<&str> = body_text.split_whitespace().collect();
+    if words.len() < 20 {
+        return 3; // default for very short texts
+    }
+
+    // Count sentences (split on . ! ? followed by whitespace or end)
+    let sentence_count = body_text
+        .chars()
+        .zip(body_text.chars().skip(1).chain(std::iter::once(' ')))
+        .filter(|(ch, next)| matches!(ch, '.' | '!' | '?') && (next.is_whitespace() || *next == '"'))
+        .count()
+        .max(1);
+
+    let avg_sentence_len = words.len() as f64 / sentence_count as f64;
+    let avg_word_len = words.iter().map(|w| w.chars().count()).sum::<usize>() as f64 / words.len() as f64;
+    let long_word_ratio = words.iter().filter(|w| w.chars().count() >= 10).count() as f64 / words.len() as f64;
+
+    // Weighted score: each metric contributes a 0.0–1.0 normalized component.
+    // Thresholds tuned for German newspaper text (taz articles).
+    let sentence_score = ((avg_sentence_len - 8.0) / 20.0).clamp(0.0, 1.0);
+    let word_len_score = ((avg_word_len - 4.0) / 4.0).clamp(0.0, 1.0);
+    let long_word_score = (long_word_ratio / 0.25).clamp(0.0, 1.0);
+
+    let combined = sentence_score * 0.4 + word_len_score * 0.3 + long_word_score * 0.3;
+    let level = (combined * 4.0 + 1.0).round() as i64;
+    level.clamp(1, 5)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── strip_search_suffix ──
+
+    #[test]
+    fn strip_search_suffix_removes_query_param() {
+        assert_eq!(
+            strip_search_suffix("https://taz.de/Title/!123456&s=Query/"),
+            "https://taz.de/Title/!123456/"
+        );
+    }
+
+    #[test]
+    fn strip_search_suffix_no_trailing_slash() {
+        assert_eq!(
+            strip_search_suffix("https://taz.de/Title/!123456&s=Query"),
+            "https://taz.de/Title/!123456"
+        );
+    }
+
+    #[test]
+    fn strip_search_suffix_no_match() {
+        let url = "https://taz.de/Title/!123456/";
+        assert_eq!(strip_search_suffix(url), url);
+    }
+
+    // ── normalize_date ──
+
+    #[test]
+    fn normalize_date_already_normalized() {
+        assert_eq!(normalize_date("2025-03-24"), "2025-03-24");
+    }
+
+    #[test]
+    fn normalize_date_iso_timestamp() {
+        assert_eq!(normalize_date("2025-03-24T10:00:00+01:00"), "2025-03-24");
+    }
+
+    #[test]
+    fn normalize_date_german_format() {
+        assert_eq!(normalize_date("24.03.2025"), "2025-03-24");
+    }
+
+    #[test]
+    fn normalize_date_unparseable_returns_as_is() {
+        assert_eq!(normalize_date("not a date"), "not a date");
+    }
+
+    #[test]
+    fn normalize_date_whitespace_trimmed() {
+        assert_eq!(normalize_date("  2025-03-24  "), "2025-03-24");
+    }
+
+    // ── clean_whitespace ──
+
+    #[test]
+    fn clean_whitespace_collapses_spaces() {
+        assert_eq!(clean_whitespace("hello   world"), "hello world");
+    }
+
+    #[test]
+    fn clean_whitespace_strips_zero_width_chars() {
+        assert_eq!(clean_whitespace("hel\u{200b}lo"), "hello");
+    }
+
+    #[test]
+    fn clean_whitespace_fixes_punctuation_spacing() {
+        // Space before period should be removed
+        assert_eq!(clean_whitespace("hello ."), "hello.");
+    }
+
+    // ── estimate_difficulty ──
+
+    #[test]
+    fn estimate_difficulty_short_text_defaults_to_3() {
+        assert_eq!(estimate_difficulty("Ein paar Wörter."), 3);
+    }
+
+    #[test]
+    fn estimate_difficulty_returns_1_to_5() {
+        // Simple sentences with short words
+        let easy = "Das ist gut. Er hat Spaß. Sie mag das. Wir sind da. ".repeat(10);
+        let score = estimate_difficulty(&easy);
+        assert!((1..=5).contains(&score), "score {score} out of range");
+    }
+
+    #[test]
+    fn estimate_difficulty_complex_text_scores_higher() {
+        let easy = "Das ist gut. Er ist da. Sie mag es. Wir auch. ".repeat(10);
+        let hard = "Die Bundesverfassungsgerichtsentscheidung über die Grundgesetzänderung zur Arbeitnehmerüberlassungsgesetzgebung wird weitreichende Konsequenzen haben. Die Verwaltungsgerichtsbarkeit prüft die Verhältnismäßigkeit der Maßnahmen zur Bekämpfung der Umweltverschmutzung. ".repeat(5);
+        assert!(
+            estimate_difficulty(&hard) > estimate_difficulty(&easy),
+            "complex German text should score higher"
+        );
+    }
+
+    // ── strip_markup ──
+
+    #[test]
+    fn strip_markup_removes_tags() {
+        assert_eq!(strip_markup("<b>bold</b> text"), "bold text");
+    }
+
+    #[test]
+    fn strip_markup_handles_nested_tags() {
+        assert_eq!(strip_markup("<div><p>hello</p></div>"), "hello");
+    }
 }

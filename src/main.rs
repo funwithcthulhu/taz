@@ -2,8 +2,9 @@
 
 use anyhow::{Context, Result, anyhow};
 use clap::{Args, Parser, Subcommand};
+use log::info;
 use taz_lingq_tool::{
-    database::Database,
+    database::{ArticleQuery, Database},
     gui,
     lingq::{LingqClient, UploadRequest},
     taz::{ArticleSummary, TazClient},
@@ -76,8 +77,14 @@ struct UploadArgs {
     collection: Option<i64>,
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
+        .format_timestamp_millis()
+        .init();
+
     let cli = Cli::parse();
+    info!("taz_lingq_tool starting");
     if matches!(cli.command, None | Some(Commands::Gui)) {
         return gui::run().map_err(|err| anyhow!("failed to launch GUI: {err}"));
     }
@@ -95,15 +102,15 @@ fn main() -> Result<()> {
             let section = scraper
                 .section_by_id(&args.section)
                 .ok_or_else(|| anyhow!("unknown section '{}'", args.section))?;
-            let articles = scraper.browse_section(section, args.limit)?;
+            let articles = scraper.browse_section(section, args.limit).await?;
             print_summaries(&articles);
         }
         Commands::BrowseUrl(args) => {
-            let articles = scraper.browse_url(&args.url, None, args.limit)?;
+            let articles = scraper.browse_url(&args.url, None, args.limit).await?;
             print_summaries(&articles);
         }
         Commands::Fetch(args) => {
-            let article = scraper.fetch_article(&args.url)?;
+            let article = scraper.fetch_article(&args.url).await?;
             println!("Title: {}", article.title);
             if !article.subtitle.is_empty() {
                 println!("Subtitle: {}", article.subtitle);
@@ -128,12 +135,13 @@ fn main() -> Result<()> {
         }
         Commands::Library(args) => {
             let db = Database::open_default()?;
-            let rows = db.list_articles(
-                args.search.as_deref(),
-                args.section.as_deref(),
-                args.only_not_uploaded,
-                args.limit,
-            )?;
+            let rows = db.list_articles(&ArticleQuery {
+                search: args.search.clone(),
+                section: args.section.clone(),
+                only_not_uploaded: args.only_not_uploaded,
+                limit: args.limit,
+                ..Default::default()
+            })?;
 
             for row in rows {
                 let uploaded = if row.uploaded_to_lingq {
@@ -166,7 +174,7 @@ fn main() -> Result<()> {
                 title: article.title.clone(),
                 text: article.clean_text.clone(),
                 original_url: Some(article.url.clone()),
-            })?;
+            }).await?;
 
             db.mark_uploaded(article.id, upload.lesson_id, &upload.lesson_url)?;
 
@@ -197,6 +205,12 @@ fn print_summaries(articles: &[ArticleSummary]) {
 fn resolve_api_key(cli_value: Option<String>) -> Result<String> {
     cli_value
         .or_else(|| std::env::var("LINGQ_API_KEY").ok())
+        .or_else(|| {
+            // Try the GUI's saved token file
+            let mut settings = taz_lingq_tool::settings::AppSettings::default();
+            let key = taz_lingq_tool::settings::load_api_key(&mut settings);
+            if key.trim().is_empty() { None } else { Some(key) }
+        })
         .filter(|value| !value.trim().is_empty())
-        .context("provide --api-key or set LINGQ_API_KEY")
+        .context("provide --api-key, set LINGQ_API_KEY, or log in via the GUI")
 }
