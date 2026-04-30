@@ -11,6 +11,22 @@ pub(super) fn wire_callbacks(window: &AppWindow, state: &Rc<RefCell<AppState>>) 
     });
 
     let state_clone = state.clone();
+    window.on_browse_set_section_index(move |index| {
+        let mut app = state_clone.borrow_mut();
+        app.browse.section_index = index.max(0) as usize;
+        app.save_settings();
+    });
+
+    let state_clone = state.clone();
+    window.on_browse_set_only_new(move |checked| {
+        let mut app = state_clone.borrow_mut();
+        app.browse.only_new = checked;
+        app.save_settings();
+        app.dirty.browse = true;
+        app.sync_to_window();
+    });
+
+    let state_clone = state.clone();
     window.on_browse_refresh(move || {
         let mut app = state_clone.borrow_mut();
         app.pull_inputs_from_window();
@@ -339,15 +355,17 @@ pub(super) fn wire_callbacks(window: &AppWindow, state: &Rc<RefCell<AppState>>) 
         app.sync_to_window();
     });
 
+    let state_clone = state.clone();
+    window.on_taz_set_search_query(move |value| {
+        let mut app = state_clone.borrow_mut();
+        app.browse.search_query = value.to_string();
+    });
+
     // taz.de search
     let state_clone = state.clone();
     window.on_taz_search(move || {
         let mut app = state_clone.borrow_mut();
-        app.browse.search_query = app
-            .window
-            .upgrade()
-            .map(|w| w.get_taz_search_query().to_string())
-            .unwrap_or_default();
+        app.pull_inputs_from_window();
         app.run_taz_search();
     });
 

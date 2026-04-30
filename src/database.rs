@@ -178,6 +178,25 @@ impl Database {
             .map_err(|_| anyhow::anyhow!("database read mutex poisoned — a background thread likely panicked"))
     }
 
+    fn restore_lingq_link_for_url(&self, conn: &Connection, url: &str) -> Result<()> {
+        conn.execute(
+            "UPDATE articles
+             SET uploaded_to_lingq = 1,
+                 lingq_lesson_id = (
+                     SELECT lesson_id FROM lingq_links WHERE article_url = ?1
+                 ),
+                 lingq_lesson_url = COALESCE((
+                     SELECT lesson_url FROM lingq_links WHERE article_url = ?1
+                 ), '')
+             WHERE url = ?1
+               AND EXISTS (
+                   SELECT 1 FROM lingq_links WHERE article_url = ?1
+               )",
+            params![url],
+        )?;
+        Ok(())
+    }
+
     pub fn save_article(&self, article: &Article) -> Result<i64> {
         debug!("Saving article: {} ({})", article.title, article.url);
         let conn = self.conn()?;
@@ -206,6 +225,8 @@ impl Database {
             ],
             |row| row.get(0),
         )?;
+
+        self.restore_lingq_link_for_url(&conn, &article.url)?;
 
         Ok(id)
     }
@@ -239,7 +260,12 @@ impl Database {
                     article.paywalled as i64,
                 ],
             ) {
-                Ok(_) => saved += 1,
+                Ok(_) => {
+                    saved += 1;
+                    if let Err(err) = self.restore_lingq_link_for_url(&conn, &article.url) {
+                        log::warn!("Failed to restore LingQ link for {}: {err:#}", article.url);
+                    }
+                }
                 Err(err) => log::warn!("Batch save failed for {}: {err:#}", article.url),
             }
         }
@@ -405,9 +431,24 @@ impl Database {
     }
 
     pub fn mark_uploaded(&self, id: i64, lesson_id: i64, lesson_url: &str) -> Result<()> {
-        self.conn()?.execute(
+        let conn = self.conn()?;
+        let article_url: String = conn.query_row(
+            "SELECT url FROM articles WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )?;
+        conn.execute(
             "UPDATE articles SET uploaded_to_lingq = 1, lingq_lesson_id = ?1, lingq_lesson_url = ?2 WHERE id = ?3",
             params![lesson_id, lesson_url, id],
+        )?;
+        conn.execute(
+            "INSERT INTO lingq_links (article_url, lesson_id, lesson_url)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(article_url) DO UPDATE SET
+                 lesson_id = excluded.lesson_id,
+                 lesson_url = excluded.lesson_url,
+                 updated_at = CURRENT_TIMESTAMP",
+            params![article_url, lesson_id, lesson_url],
         )?;
         Ok(())
     }
@@ -799,6 +840,38 @@ impl Database {
             )?;
         }
 
+        if current_version < 8 {
+            conn.execute_batch(
+                r#"
+                BEGIN;
+
+                CREATE TABLE IF NOT EXISTS lingq_links (
+                    article_url TEXT PRIMARY KEY,
+                    lesson_id INTEGER NOT NULL,
+                    lesson_url TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_lingq_links_lesson_id
+                    ON lingq_links(lesson_id);
+
+                INSERT INTO lingq_links (article_url, lesson_id, lesson_url)
+                SELECT url, lingq_lesson_id, lingq_lesson_url
+                FROM articles
+                WHERE uploaded_to_lingq = 1
+                  AND lingq_lesson_id IS NOT NULL
+                ON CONFLICT(article_url) DO UPDATE SET
+                    lesson_id = excluded.lesson_id,
+                    lesson_url = excluded.lesson_url,
+                    updated_at = CURRENT_TIMESTAMP;
+
+                INSERT INTO schema_version (version) VALUES (8);
+
+                COMMIT;
+                "#,
+            )?;
+        }
+
         Ok(())
     }
 }
@@ -1011,6 +1084,55 @@ mod tests {
             ..Default::default()
         }).unwrap();
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn re_saved_article_restores_lingq_link_history() {
+        let db = Database::open(Path::new(":memory:")).unwrap();
+        let article = Article {
+            url: "https://taz.de/test/!7777/".to_owned(),
+            title: "History Test".to_owned(),
+            subtitle: String::new(),
+            author: String::new(),
+            date: String::new(),
+            section: "Politik".to_owned(),
+            body_text: "Body.".to_owned(),
+            clean_text: "Clean.".to_owned(),
+            word_count: 1,
+            difficulty: 3,
+            fetched_at: "2025-01-15T10:00:00Z".to_owned(),
+            paywalled: false,
+        };
+
+        let id = db.save_article(&article).unwrap();
+        db.mark_uploaded(id, 12345, "https://lingq.com/lesson/12345/").unwrap();
+        db.delete_article(id).unwrap();
+
+        let new_id = db.save_article(&article).unwrap();
+        let restored = db.get_article(new_id).unwrap().unwrap();
+        assert!(restored.uploaded_to_lingq);
+        assert_eq!(restored.lingq_lesson_id, Some(12345));
+        assert_eq!(restored.lingq_lesson_url, "https://lingq.com/lesson/12345/");
+    }
+
+    #[test]
+    fn batch_save_restores_lingq_link_history() {
+        let db = Database::open(Path::new(":memory:")).unwrap();
+        let article = make_article("https://taz.de/a/!linked/", "Linked");
+        let id = db.save_article(&article).unwrap();
+        db.mark_uploaded(id, 54321, "https://lingq.com/lesson/54321/").unwrap();
+        db.delete_article(id).unwrap();
+
+        db.save_articles_batch(&[article]).unwrap();
+        let restored = db
+            .list_articles(&ArticleQuery {
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(restored.len(), 1);
+        assert!(restored[0].uploaded_to_lingq);
+        assert_eq!(restored[0].lingq_lesson_id, Some(54321));
     }
 
     #[test]

@@ -104,6 +104,8 @@ export component AppWindow inherits Window {
     in-out property <bool> auto-fetch-on-startup: false;
 
     callback switch-page(int);
+    callback browse-set-section-index(int);
+    callback browse-set-only-new(bool);
     callback browse-refresh();
     callback browse-load-more();
     callback browse-toggle-article(int);
@@ -140,6 +142,7 @@ export component AppWindow inherits Window {
     callback library-search-accepted();
     callback browse-set-date-preset(int);
     callback toggle-preview-width();
+    callback taz-set-search-query(string);
     callback taz-search();
     callback cancel-operation();
     callback library-key-up();
@@ -310,8 +313,17 @@ export component AppWindow inherits Window {
                                 spacing: 2px;
                                 HorizontalLayout {
                                     spacing: 6px;
-                                    ComboBox { model: root.browse-section-labels; current-index <=> root.browse-section-index; min-width: 180px; }
-                                    CheckBox { text: "Only new"; checked <=> root.browse-only-new; }
+                                    ComboBox {
+                                        model: root.browse-section-labels;
+                                        current-index <=> root.browse-section-index;
+                                        min-width: 180px;
+                                        selected(_) => { root.browse-set-section-index(root.browse-section-index); }
+                                    }
+                                    CheckBox {
+                                        text: "Only new";
+                                        checked <=> root.browse-only-new;
+                                        toggled => { root.browse-set-only-new(self.checked); }
+                                    }
                                     Button { text: "Select all"; clicked => { root.browse-select-all-new(); } }
                                     Button { text: "Clear"; clicked => { root.browse-clear-selection(); } }
                                     Button { text: "Save selected"; clicked => { root.browse-save-selected(); } }
@@ -337,6 +349,7 @@ export component AppWindow inherits Window {
                                     text <=> root.taz-search-query;
                                     placeholder-text: "e.g. Klimawandel, Ukraine, Migration...";
                                     horizontal-stretch: 1;
+                                    edited => { root.taz-set-search-query(self.text); }
                                     accepted => { root.taz-search(); }
                                 }
                                 Button { text: "Search"; clicked => { root.taz-search(); } }
