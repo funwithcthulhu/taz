@@ -2,7 +2,7 @@ import { Button, CheckBox, ComboBox, LineEdit, ScrollView } from "std-widgets.sl
 
 export struct BrowseRow { title: string, teaser: string, section: string, source: string, source_label: string, url: string, selected: bool, saved: bool }
 export struct BulkSectionRow { label: string, selected: bool }
-export struct LibraryRow { id: int, title: string, section: string, heading: string, date: string, words: string, difficulty: int, url: string, uploaded: bool, selected: bool, confirming-delete: bool, viewing: bool }
+export struct LibraryRow { id: int, title: string, section: string, heading: string, date: string, words: string, difficulty: int, url: string, uploaded: bool, paywalled: bool, selected: bool, confirming-delete: bool, viewing: bool }
 export struct StatCard { label: string, value: string }
 
 component Panel inherits Rectangle {
@@ -101,6 +101,7 @@ export component AppWindow inherits Window {
     in property <bool> progress-visible: false;
     in property <string> browse-count: "";
     in property <string> library-count: "";
+    in-out property <bool> auto-fetch-on-startup: false;
 
     callback switch-page(int);
     callback browse-refresh();
@@ -372,7 +373,8 @@ export component AppWindow inherits Window {
                                     PresetBtn { label: "3mo"; clicked => { root.browse-set-date-preset(2); } }
                                     PresetBtn { label: "This year"; clicked => { root.browse-set-date-preset(3); } }
                                     PresetBtn { label: "Last year"; clicked => { root.browse-set-date-preset(4); } }
-                                    Rectangle { }
+                                    Rectangle { horizontal-stretch: 1; }
+                                    CheckBox { text: "Auto-fetch on startup"; checked <=> root.auto-fetch-on-startup; }
                                 }
                                 if root.show-bulk-sections : Panel {
                                     panel-background: #1b2230;
@@ -597,6 +599,7 @@ export component AppWindow inherits Window {
                                                                 Text { text: article.difficulty; color: article.difficulty <= 2 ? white : article.difficulty == 3 ? #1a1a2e : white; font-size: 10px; font-weight: 800; horizontal-alignment: center; vertical-alignment: center; }
                                                             }
                                                             Text { text: article.date; color: #6e8bb5; font-size: 11px; vertical-alignment: center; }
+                                                            if article.paywalled : Text { text: "Paywall"; color: #e76f51; font-size: 11px; font-weight: 700; vertical-alignment: center; }
                                                             Text { text: article.uploaded ? "LingQ" : "Local"; color: article.uploaded ? #7ce2a4 : #9aa6be; font-size: 11px; vertical-alignment: center; }
                                                         }
                                                         Text { text: article.section; color: #6e8bb5; font-size: 11px; }

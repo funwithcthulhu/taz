@@ -14,10 +14,12 @@ This project is a Windows-native workflow for reading, saving, and uploading `ta
 
 - Browse built-in `taz.de` sections and load more article candidates.
 - Search and discover across section pages and related topic pages.
+- Auto-fetch recent articles on startup if you enable it in the GUI.
 - Save articles locally with metadata, clean text, and word counts.
+- Detect likely paywalled/truncated articles and label them in the library UI.
 - Filter the library by heading, section, upload status, and word count.
 - Preview cleaned article text before uploading.
-- Upload selected articles to a LingQ course/collection.
+- Upload selected articles to a LingQ course/collection, or update an existing LingQ lesson with improved text.
 - Save LingQ credentials/settings in the local app data area.
 - Build a Windows installer and desktop/start-menu shortcuts.
 

@@ -14,8 +14,8 @@ impl AppState {
         self.bulk.per_section_cap = window.get_bulk_per_section_cap().to_string();
         self.bulk.stop_after_old = window.get_bulk_stop_after_old().to_string();
         self.library.search = window.get_library_search().to_string();
-        self.library.heading = indexed_label(&self.heading_labels(), window.get_library_heading_index());
-        self.library.section = indexed_label(&self.section_labels(), window.get_library_section_index());
+        self.library.heading = indexed_label(&self.library.cached_heading_labels, window.get_library_heading_index());
+        self.library.section = indexed_label(&self.library.cached_section_labels, window.get_library_section_index());
         self.library.sort_mode = LibrarySortMode::from_index(window.get_library_sort_index());
         self.library.only_not_uploaded = window.get_library_only_not_uploaded();
         self.library.min_words = window.get_library_min_words().to_string();
@@ -29,6 +29,7 @@ impl AppState {
         self.lq.api_key = window.get_lingq_token().to_string();
         self.lq.username = window.get_lingq_username().to_string();
         self.lq.password = window.get_lingq_password().to_string();
+        self.bulk.auto_fetch_on_startup = window.get_auto_fetch_on_startup();
 
         let collection_index = window.get_lingq_collection_index().max(0) as usize;
         self.lq.selected_collection = if collection_index == 0 {
@@ -51,8 +52,11 @@ impl AppState {
         }
         self.settings_dirty = false;
 
-        // Save API key to its own file (not in settings.json)
-        let _ = settings::save_api_key(&self.lq.api_key);
+        // Save API key to its own file only when it actually changed
+        if self.lq.api_key != self.lq.api_key_last_saved {
+            let _ = settings::save_api_key(&self.lq.api_key);
+            self.lq.api_key_last_saved.clone_from(&self.lq.api_key);
+        }
 
         // Compute values that borrow &self before taking &mut self.settings
         let section_id = self.current_section().id.to_owned();
@@ -91,6 +95,7 @@ impl AppState {
         s.show_library_filters = self.library.show_filters;
         s.show_upload_tools = self.library.show_upload_tools;
         s.preview_wide = self.library.preview_wide;
+        s.auto_fetch_on_startup = self.bulk.auto_fetch_on_startup;
 
         let _ = self.settings.save();
     }
@@ -193,6 +198,7 @@ impl AppState {
         window.set_bulk_max_articles(self.bulk.max_articles.clone().into());
         window.set_bulk_per_section_cap(self.bulk.per_section_cap.clone().into());
         window.set_bulk_stop_after_old(self.bulk.stop_after_old.clone().into());
+        window.set_auto_fetch_on_startup(self.bulk.auto_fetch_on_startup);
         window.set_library_search(self.library.search.clone().into());
         window.set_library_sort_index(self.library.sort_mode.index());
         window.set_library_only_not_uploaded(self.library.only_not_uploaded);
@@ -313,23 +319,23 @@ impl AppState {
 
         // ── Library models (only rebuilt when library data or selection changes) ──
         if self.dirty.library {
-            let heading_labels = self.heading_labels();
-            let section_labels = self.section_labels();
+            self.library.cached_heading_labels = self.heading_labels();
+            self.library.cached_section_labels = self.section_labels();
             let sort_labels = LibrarySortMode::all()
                 .into_iter()
                 .map(|mode| SharedString::from(mode.label()))
                 .collect::<Vec<_>>();
-            let heading_index = index_of_label(&heading_labels, &self.library.heading);
-            let section_index = index_of_label(&section_labels, &self.library.section);
+            let heading_index = index_of_label(&self.library.cached_heading_labels, &self.library.heading);
+            let section_index = index_of_label(&self.library.cached_section_labels, &self.library.section);
             window.set_heading_labels(ModelRc::from(Rc::new(VecModel::from(
-                heading_labels
+                self.library.cached_heading_labels
                     .iter()
                     .cloned()
                     .map(SharedString::from)
                     .collect::<Vec<_>>(),
             ))));
             window.set_section_labels(ModelRc::from(Rc::new(VecModel::from(
-                section_labels
+                self.library.cached_section_labels
                     .iter()
                     .cloned()
                     .map(SharedString::from)
@@ -352,6 +358,7 @@ impl AppState {
                     difficulty: article.difficulty as i32,
                     url: article.url.clone().into(),
                     uploaded: article.uploaded_to_lingq,
+                    paywalled: article.paywalled,
                     selected: self.lq.selected_articles.contains(&article.id),
                     confirming_delete: self.library.delete_confirm_id == Some(article.id),
                     viewing: self.library.selected_article_id == Some(article.id),
@@ -393,7 +400,7 @@ impl AppState {
                 window.set_preview_title(article.title.clone().into());
                 window.set_preview_meta(
                     format!(
-                        "{} | {} words | {} | {}",
+                        "{} | {} words | {} | {}{}",
                         article.section,
                         article.word_count,
                         article.date,
@@ -401,6 +408,11 @@ impl AppState {
                             "On LingQ"
                         } else {
                             "Not on LingQ"
+                        },
+                        if article.paywalled {
+                            " | Paywalled"
+                        } else {
+                            ""
                         }
                     )
                     .into(),

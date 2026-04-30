@@ -164,6 +164,7 @@ struct BulkFetchState {
     max_articles: String,
     per_section_cap: String,
     stop_after_old: String,
+    auto_fetch_on_startup: bool,
 }
 
 /// State for the Library page: stored articles, filters, and preview.
@@ -183,6 +184,10 @@ struct LibraryState {
     show_upload_tools: bool,
     delete_confirm_id: Option<i64>,
     preview_wide: bool,
+    /// Cached heading labels derived from articles — rebuilt when dirty.library is set.
+    cached_heading_labels: Vec<String>,
+    /// Cached section labels derived from articles — rebuilt when dirty.library is set.
+    cached_section_labels: Vec<String>,
 }
 
 /// State for LingQ integration: authentication, collection selection, and upload.
@@ -196,6 +201,8 @@ struct LingqState {
     max_words: String,
     show_settings: bool,
     api_key: String,
+    /// Snapshot of the API key at last save, to avoid redundant disk writes.
+    api_key_last_saved: String,
     username: String,
     password: String,
     /// Tracks consecutive failed login attempts for rate-limiting.
@@ -380,6 +387,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
             max_articles: sd.bulk_max_articles,
             per_section_cap: sd.bulk_per_section_cap,
             stop_after_old: sd.bulk_stop_after_old,
+            auto_fetch_on_startup: sd.auto_fetch_on_startup,
         },
         library: LibraryState {
             articles: Vec::new(),
@@ -396,6 +404,8 @@ pub fn run() -> Result<(), slint::PlatformError> {
             show_upload_tools: sd.show_upload_tools,
             delete_confirm_id: None,
             preview_wide: sd.preview_wide,
+            cached_heading_labels: Vec::new(),
+            cached_section_labels: Vec::new(),
         },
         lq: LingqState {
             language: sd.lingq_language,
@@ -406,6 +416,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
             min_words: sd.lingq_min_words,
             max_words: sd.lingq_max_words,
             show_settings: false,
+            api_key_last_saved: api_key.clone(),
             api_key,
             username: String::new(),
             password: String::new(),
@@ -423,6 +434,16 @@ pub fn run() -> Result<(), slint::PlatformError> {
         app.load_library();
         app.load_browse();
         app.load_collections_if_possible();
+        if sd.auto_fetch_on_startup {
+            app.run_auto_fetch();
+        }
+        // Fire-and-forget: discover any new nav sections on taz.de
+        let discover_scraper = app.scraper.clone();
+        app.runtime.spawn(async move {
+            if let Err(err) = discover_scraper.discover_new_sections().await {
+                log::debug!("Section discovery failed: {err:#}");
+            }
+        });
         app.sync_to_window();
     }
 

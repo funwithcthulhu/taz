@@ -112,6 +112,10 @@ impl AppState {
             self.set_status("Save a LingQ token first.");
             return;
         }
+        if !is_plausible_api_key(&self.lq.api_key) {
+            self.set_status("LingQ token looks invalid — expected 8+ alphanumeric characters.");
+            return;
+        }
         let api_key = self.lq.api_key.clone();
         let language = self.lq.language.clone();
         let lingq = self.lingq.clone();
@@ -362,7 +366,7 @@ impl AppState {
                                         saved += 1;
                                         accepted_for_section += 1;
                                         let _ = tx.send(AppEvent::FetchProgress(FetchProgress {
-                                            label: "Fetching selected sections".to_owned(),
+                                            label: format!("Fetching: {}", section.label),
                                             completed: saved.min(max_articles),
                                             total: max_articles,
                                         }));
@@ -398,6 +402,135 @@ impl AppState {
                 }
                 Err(err) => AppEvent::FetchFinished {
                     message: err,
+                    failed: Vec::new(),
+                },
+            };
+            let _ = tx.send(event);
+        });
+    }
+
+    /// Auto-fetch recent articles on startup.  Uses all available sections,
+    /// fetches articles from the last 2 days, capped at 5 per section / 30 total.
+    pub(super) fn run_auto_fetch(&mut self) {
+        let today = chrono::Local::now().date_naive();
+        let two_days_ago = today - chrono::Duration::days(2);
+
+        let section_ids: Vec<String> = self.sections.iter().map(|s| s.id.to_owned()).collect();
+        let imported_urls = self.browse.saved_urls.clone();
+        let max_articles: usize = 30;
+        let per_section_cap: usize = 5;
+        let stop_after_old: usize = 8;
+
+        self.cancel_flag.store(false, Ordering::Relaxed);
+        self.progress = Some(FetchProgress {
+            label: "Auto-fetching recent articles".to_owned(),
+            completed: 0,
+            total: max_articles,
+        });
+        self.sync_to_window();
+
+        let tx = self.tx.clone();
+        let scraper = self.scraper.clone();
+        let db = self.db.clone();
+        let cancel = self.cancel_flag.clone();
+
+        self.runtime.spawn(async move {
+            let result: Result<(usize, usize, Vec<String>, bool), String> = async {
+                let discovery_limit = per_section_cap.saturating_mul(4).max(40);
+                let mut seen = std::collections::HashSet::new();
+                let mut saved = 0usize;
+                let mut skipped_existing = 0usize;
+                let mut failed = Vec::new();
+
+                for section_id in &section_ids {
+                    let Some(section) = scraper.section_by_id(section_id) else {
+                        continue;
+                    };
+                    let mut accepted_for_section = 0usize;
+                    let mut consecutive_old = 0usize;
+
+                    let summaries = match scraper.browse_section(section, discovery_limit).await {
+                        Ok(s) => s,
+                        Err(_) => continue,
+                    };
+
+                    for summary in summaries {
+                        if saved >= max_articles || accepted_for_section >= per_section_cap {
+                            break;
+                        }
+                        if imported_urls.contains(&summary.url) {
+                            skipped_existing += 1;
+                            continue;
+                        }
+                        if !seen.insert(summary.url.clone()) {
+                            continue;
+                        }
+                        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                            break;
+                        }
+                        tokio::time::sleep(REQUEST_THROTTLE).await;
+
+                        match scraper.fetch_article(&summary.url).await {
+                            Ok(article) => {
+                                let Some(article_date) = parse_article_date(&article.date) else {
+                                    consecutive_old += 1;
+                                    if consecutive_old >= stop_after_old {
+                                        break;
+                                    }
+                                    continue;
+                                };
+                                if article_date < two_days_ago || article_date > today {
+                                    consecutive_old += 1;
+                                    if consecutive_old >= stop_after_old {
+                                        break;
+                                    }
+                                    continue;
+                                }
+
+                                consecutive_old = 0;
+                                match db.save_article(&article) {
+                                    Ok(_) => {
+                                        saved += 1;
+                                        accepted_for_section += 1;
+                                        let _ = tx.send(AppEvent::FetchProgress(FetchProgress {
+                                            label: format!("Auto-fetch: {}", section.label),
+                                            completed: saved.min(max_articles),
+                                            total: max_articles,
+                                        }));
+                                    }
+                                    Err(err) => {
+                                        failed.push(format!("{}: {}", article.title, err));
+                                    }
+                                }
+                            }
+                            Err(err) => failed.push(format!("{}: {}", summary.title, err)),
+                        }
+                    }
+
+                    if saved >= max_articles
+                        || cancel.load(std::sync::atomic::Ordering::Relaxed)
+                    {
+                        break;
+                    }
+                }
+
+                let cancelled = cancel.load(std::sync::atomic::Ordering::Relaxed);
+                Ok((saved, skipped_existing, failed, cancelled))
+            }
+            .await;
+
+            let event = match result {
+                Ok((saved, skipped_existing, failed, cancelled)) => {
+                    let prefix = if cancelled { "Cancelled. " } else { "" };
+                    AppEvent::FetchFinished {
+                        message: format!(
+                            "{prefix}Auto-fetch: saved {saved} new article(s), skipped {skipped_existing} existing."
+                        ),
+                        failed,
+                    }
+                }
+                Err(err) => AppEvent::FetchFinished {
+                    message: format!("Auto-fetch error: {err}"),
                     failed: Vec::new(),
                 },
             };
@@ -468,16 +601,6 @@ impl AppState {
                         failed.push(format!("article #{id} not found"));
                         continue;
                     };
-                    // Auto-skip articles already on LingQ
-                    if article.uploaded_to_lingq {
-                        skipped_already += 1;
-                        let _ = tx.send(AppEvent::FetchProgress(FetchProgress {
-                            label: "Uploading to LingQ".to_owned(),
-                            completed: index + 1,
-                            total,
-                        }));
-                        continue;
-                    }
                     let request = UploadRequest {
                         api_key: api_key.clone(),
                         language_code: language.clone(),
@@ -487,8 +610,19 @@ impl AppState {
                         original_url: Some(article.url.clone()),
                     };
 
-                    match lingq.upload_lesson(&request).await {
+                    // If already on LingQ, update the existing lesson; otherwise create new
+                    let upload_result = if let Some(existing_id) = article.lingq_lesson_id {
+                        lingq.update_lesson(&request, existing_id).await
+                    } else {
+                        lingq.upload_lesson(&request).await
+                    };
+
+                    match upload_result {
                         Ok(response) => {
+                            if article.uploaded_to_lingq {
+                                // Re-upload: lesson was updated, not newly created
+                                skipped_already += 1;
+                            }
                             if let Err(err) =
                                 db.mark_uploaded(article.id, response.lesson_id, &response.lesson_url)
                             {
@@ -657,6 +791,7 @@ impl AppState {
                         self.set_status("LingQ login succeeded.");
                     }
                     Err(err) => {
+                        self.lq.password.clear();
                         self.lq.login_failures += 1;
                         if self.lq.login_failures >= 3 {
                             let cooldown = std::time::Duration::from_secs(
@@ -691,4 +826,10 @@ impl AppState {
             }
         }
     }
+}
+
+/// Quick plausibility check for an API token: must be 8+ alphanumeric characters.
+fn is_plausible_api_key(key: &str) -> bool {
+    let trimmed = key.trim();
+    trimmed.len() >= 8 && trimmed.chars().all(|ch| ch.is_ascii_alphanumeric())
 }

@@ -38,6 +38,9 @@ pub struct AppSettings {
     pub show_library_filters: bool,
     pub show_upload_tools: bool,
     pub preview_wide: bool,
+
+    // Auto-fetch
+    pub auto_fetch_on_startup: bool,
 }
 
 impl Default for AppSettings {
@@ -64,6 +67,7 @@ impl Default for AppSettings {
             show_library_filters: true,
             show_upload_tools: true,
             preview_wide: false,
+            auto_fetch_on_startup: false,
         }
     }
 }

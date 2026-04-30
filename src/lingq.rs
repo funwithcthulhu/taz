@@ -68,7 +68,7 @@ pub struct LingqClient {
 impl LingqClient {
     pub fn new() -> Result<Self> {
         let client = Client::builder()
-            .user_agent("taz_lingq_tool/0.1.0")
+            .user_agent(format!("taz_lingq_tool/{}", env!("CARGO_PKG_VERSION")))
             .timeout(std::time::Duration::from_secs(30))
             .connect_timeout(std::time::Duration::from_secs(10))
             .build()
@@ -187,6 +187,53 @@ impl LingqClient {
             .json()
             .await
             .context("failed to parse LingQ upload response")?;
+
+        Ok(UploadResponse {
+            lesson_id: lesson.id,
+            lesson_url: format!(
+                "https://www.lingq.com/{}/learn/lesson/{}/",
+                request.language_code, lesson.id
+            ),
+        })
+    }
+    /// Update an existing lesson on LingQ (PATCH). Useful when article text
+    /// has been re-fetched with better content or the article was previously
+    /// paywalled and is now available.
+    pub async fn update_lesson(&self, request: &UploadRequest, lesson_id: i64) -> Result<UploadResponse> {
+        info!("Updating LingQ lesson {}: {}", lesson_id, request.title);
+        let normalized_text = normalize_text(&request.text);
+        if normalized_text.trim().is_empty() {
+            bail!("lesson text is empty");
+        }
+
+        let mut payload = serde_json::json!({
+            "title": request.title,
+            "text": normalized_text,
+        });
+
+        if let Some(original_url) = &request.original_url {
+            payload["original_url"] = serde_json::json!(original_url);
+        }
+
+        let mut auth = reqwest::header::HeaderValue::from_str(&format!("Token {}", request.api_key))
+            .context("invalid API key characters")?;
+        auth.set_sensitive(true);
+        let response = self
+            .client
+            .patch(format!("{}/{}/lessons/{}/", LINGQ_BASE, request.language_code, lesson_id))
+            .header("Authorization", auth)
+            .json(&payload)
+            .send()
+            .await
+            .context("LingQ update request failed")?;
+
+        let response = response
+            .error_for_status()
+            .context("LingQ rejected the lesson update")?;
+        let lesson: LingqLessonResponse = response
+            .json()
+            .await
+            .context("failed to parse LingQ update response")?;
 
         Ok(UploadResponse {
             lesson_id: lesson.id,

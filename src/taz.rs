@@ -68,6 +68,26 @@ mod selectors {
         "Fehlerhinweis",
         "Mehr zum Thema",
     ];
+
+    // CSS selectors that indicate a paywall
+    pub const PAYWALL: &[&str] = &[
+        ".paywall",
+        ".paywall-overlay",
+        "[data-paywall]",
+        ".tzi-paywall",
+        ".article-paywall",
+        ".hide-paywall",
+    ];
+
+    // Text patterns in the HTML that indicate paywall-truncated content
+    pub const PAYWALL_TEXT_MARKERS: &[&str] = &[
+        "taz zahl ich",
+        "Lesen Sie diesen Artikel mit taz-zahl-ich",
+        "Dieser Artikel ist für Abonnent",
+        "Für diesen Artikel müssen Sie",
+        "Jetzt taz zahl ich Mitglied werden",
+        "Ab jetzt frei lesen",
+    ];
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -158,6 +178,8 @@ pub struct Article {
     pub word_count: usize,
     pub difficulty: i64,
     pub fetched_at: String,
+    /// True if paywall markers were detected — content may be truncated.
+    pub paywalled: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -412,6 +434,58 @@ impl TazClient {
         SECTIONS
     }
 
+    /// Scrape the taz.de homepage navigation and log any sections not in the
+    /// hardcoded list. Returns the URLs of any newly discovered nav links.
+    pub async fn discover_new_sections(&self) -> Result<Vec<(String, String)>> {
+        let html = self
+            .client
+            .get("https://taz.de")
+            .send()
+            .await?
+            .text()
+            .await?;
+        let document = Html::parse_document(&html);
+        let nav_sel =
+            Selector::parse("nav a[href]").unwrap_or_else(|_| Selector::parse("a").unwrap());
+        let known_urls: std::collections::HashSet<&str> =
+            SECTIONS.iter().map(|s| s.url).collect();
+        let mut discovered = Vec::new();
+        for element in document.select(&nav_sel) {
+            let Some(href) = element.value().attr("href") else {
+                continue;
+            };
+            let url = if href.starts_with('/') {
+                format!("https://taz.de{href}")
+            } else {
+                href.to_owned()
+            };
+            if !url.starts_with("https://taz.de/") {
+                continue;
+            }
+            // Skip article URLs, only want section/category pages (contain !p)
+            if !url.contains("!p") {
+                continue;
+            }
+            if known_urls.contains(url.as_str()) {
+                continue;
+            }
+            let label = element.text().collect::<String>().trim().to_owned();
+            if !label.is_empty() && !discovered.iter().any(|(u, _): &(String, String)| *u == url) {
+                log::info!("Discovered new taz section: {label} → {url}");
+                discovered.push((url, label));
+            }
+        }
+        if discovered.is_empty() {
+            log::debug!("No new sections discovered on taz.de homepage");
+        } else {
+            log::info!(
+                "Found {} section(s) not in hardcoded list",
+                discovered.len()
+            );
+        }
+        Ok(discovered)
+    }
+
     pub fn section_by_id(&self, id: &str) -> Option<&'static Section> {
         SECTIONS.iter().find(|section| section.id == id)
     }
@@ -562,6 +636,7 @@ impl TazClient {
         .or_else(|| extract_section_from_html(&html))
         .unwrap_or_else(|| infer_section_from_url(url));
 
+        let paywalled = detect_paywall(&document, &html);
         let body_text = extract_body(&document)?;
         let word_count = body_text.split_whitespace().count();
         if word_count < 80 {
@@ -582,6 +657,7 @@ impl TazClient {
             clean_text,
             word_count,
             difficulty,
+            paywalled,
             fetched_at: iso_timestamp_now(),
         })
     }
@@ -891,6 +967,92 @@ fn is_retryable_status(status: StatusCode) -> bool {
         )
 }
 
+/// Check whether the page contains paywall indicators (CSS elements or text markers).
+fn detect_paywall(document: &Html, html: &str) -> bool {
+    // Check for paywall CSS selectors
+    for selector_str in selectors::PAYWALL {
+        let Ok(selector) = Selector::parse(selector_str) else { continue };
+        if document.select(&selector).next().is_some() {
+            return true;
+        }
+    }
+    // Check for paywall text markers in raw HTML (faster than parsing)
+    let html_lower = html.to_lowercase();
+    for marker in selectors::PAYWALL_TEXT_MARKERS {
+        if html_lower.contains(&marker.to_lowercase()) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Tags whose `<p>` / `<li>` descendants should be excluded from the article
+/// body.  These typically contain image captions, author bios, or sidebar
+/// info-boxes that are *inside* the `<article>` element but are not part of the
+/// running text.
+const EXCLUDE_ANCESTOR_TAGS: &[&str] = &["figure", "figcaption", "aside"];
+
+/// CSS class substrings on ancestor `<div>` / `<section>` elements that mark a
+/// region as non-body content (e.g. author bio boxes, info-boxes).
+const EXCLUDE_ANCESTOR_CLASSES: &[&str] = &["webelement_bio", "webelement_info", "author-container"];
+
+/// Minimum character length for an interview-style question/answer label
+/// (e.g. "taz: Wie war das?" or "Reynolds: Ja.").  These are intentionally
+/// short and would be dropped by the normal 45-char paragraph filter.
+const INTERVIEW_MIN_LEN: usize = 6;
+
+/// Prefixes that mark a paragraph as an interview question or speaker label.
+/// Matched case-insensitively against the start of the cleaned text.
+const INTERVIEW_PREFIXES: &[&str] = &["taz:", "taz :", "taz :"];
+
+/// Check whether `node` has any ancestor whose tag name is in
+/// `EXCLUDE_ANCESTOR_TAGS` or whose CSS class contains one of the
+/// `EXCLUDE_ANCESTOR_CLASSES` substrings.
+fn has_excluded_ancestor(node: &ElementRef<'_>) -> bool {
+    // Walk up via the underlying ego-tree node references.
+    let mut current = node.parent();
+    while let Some(parent_ref) = current {
+        if let Some(element) = parent_ref.value().as_element() {
+            let tag = element.name();
+            if EXCLUDE_ANCESTOR_TAGS.contains(&tag) {
+                return true;
+            }
+            if let Some(classes) = element.attr("class") {
+                if EXCLUDE_ANCESTOR_CLASSES.iter().any(|c| classes.contains(c)) {
+                    return true;
+                }
+            }
+        }
+        current = parent_ref.parent();
+    }
+    false
+}
+
+/// Return `true` when the paragraph looks like an interview speaker label —
+/// either an exact known prefix ("taz:") or any `Name:` / `Name Name:` pattern
+/// at the start of the text (common for the interviewee's answers).
+fn is_interview_line(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    if INTERVIEW_PREFIXES.iter().any(|p| lower.starts_with(p)) {
+        return true;
+    }
+    // Detect "SomeName:" or "First Last:" at the start (answer lines).
+    // Pattern: 1-3 capitalised words followed by a colon within the first 40 chars.
+    if let Some(colon_pos) = text[..text.len().min(40)].find(':') {
+        let prefix = &text[..colon_pos];
+        let words: Vec<&str> = prefix.split_whitespace().collect();
+        if (1..=3).contains(&words.len())
+            && words.iter().all(|w| {
+                w.chars().next().map_or(false, |c| c.is_uppercase())
+                    && w.chars().all(|c| c.is_alphabetic())
+            })
+        {
+            return true;
+        }
+    }
+    false
+}
+
 fn extract_body(document: &Html) -> Result<String> {
     let article_selector = parsed::ARTICLE.clone();
     let paragraph_selector = parsed::BODY_ELEMENTS.clone();
@@ -902,6 +1064,11 @@ fn extract_body(document: &Html) -> Result<String> {
         let mut blocks = Vec::new();
 
         for node in article.select(&paragraph_selector) {
+            // Skip elements nested inside figure/figcaption/aside
+            if has_excluded_ancestor(&node) {
+                continue;
+            }
+
             let name = node.value().name();
             let text = clean_whitespace(&collect_text(node));
             if text.is_empty() || donate_markers.iter().any(|marker| text.contains(marker)) {
@@ -911,7 +1078,14 @@ fn extract_body(document: &Html) -> Result<String> {
             match name {
                 "h2" | "h3" if text.len() >= 4 => blocks.push(format!("## {text}")),
                 "li" if text.len() >= 20 => blocks.push(format!("- {text}")),
-                "p" if text.len() >= 45 => blocks.push(text),
+                "p" => {
+                    // Keep short paragraphs that are interview Q&A labels
+                    if text.len() >= 45
+                        || (text.len() >= INTERVIEW_MIN_LEN && is_interview_line(&text))
+                    {
+                        blocks.push(text);
+                    }
+                }
                 _ => {}
             }
         }
@@ -1033,6 +1207,9 @@ fn build_clean_text(title: &str, subtitle: &str, author: &str, date: &str, body:
 
 fn normalize_body_for_lingq(body: &str, title: &str, subtitle: &str) -> String {
     let mut cleaned_blocks = Vec::new();
+    // Pre-compute canonical forms to avoid recalculating per block
+    let canon_title = canonical_text(title);
+    let canon_subtitle = canonical_text(subtitle);
 
     for raw_block in body.split("\n\n") {
         let block = clean_whitespace(raw_block);
@@ -1046,12 +1223,8 @@ fn normalize_body_for_lingq(body: &str, title: &str, subtitle: &str) -> String {
             block
         };
 
-        if same_enough(&normalized_block, title)
-            || overlaps_enough(&normalized_block, title)
-            || (!subtitle.is_empty()
-                && (same_enough(&normalized_block, subtitle)
-                    || overlaps_enough(&normalized_block, subtitle)))
-        {
+        let canon_block = canonical_text(&normalized_block);
+        if matches_title_or_subtitle(&canon_block, &canon_title, &canon_subtitle) {
             continue;
         }
 
@@ -1083,14 +1256,39 @@ fn dedupe_similar_blocks(blocks: &mut Vec<String>) {
 }
 
 fn canonical_text(value: &str) -> String {
-    value
+    let collapsed: String = value
         .chars()
         .filter(|ch| ch.is_alphanumeric() || ch.is_whitespace())
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase()
+        .collect();
+    let mut result = String::with_capacity(collapsed.len());
+    for word in collapsed.split_whitespace() {
+        if !result.is_empty() {
+            result.push(' ');
+        }
+        result.push_str(word);
+    }
+    result.to_lowercase()
+}
+
+/// Check if a block's canonical form matches title or subtitle (already canonicalized).
+fn matches_title_or_subtitle(canon_block: &str, canon_title: &str, canon_subtitle: &str) -> bool {
+    if !canon_block.is_empty() {
+        // Same as title?
+        if canon_block == canon_title {
+            return true;
+        }
+        // Overlaps title?
+        if overlaps_canonical(canon_block, canon_title) {
+            return true;
+        }
+        // Same as or overlaps subtitle?
+        if !canon_subtitle.is_empty()
+            && (canon_block == canon_subtitle || overlaps_canonical(canon_block, canon_subtitle))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn same_enough(left: &str, right: &str) -> bool {
@@ -1100,18 +1298,19 @@ fn same_enough(left: &str, right: &str) -> bool {
 }
 
 fn overlaps_enough(left: &str, right: &str) -> bool {
-    let left = canonical_text(left);
-    let right = canonical_text(right);
+    overlaps_canonical(&canonical_text(left), &canonical_text(right))
+}
+
+/// Check overlap between two already-canonicalized strings.
+fn overlaps_canonical(left: &str, right: &str) -> bool {
     if left.is_empty() || right.is_empty() {
         return false;
     }
-
     let shorter = left.len().min(right.len());
     if shorter < 40 {
         return false;
     }
-
-    left.contains(&right) || right.contains(&left)
+    left.contains(right) || right.contains(left)
 }
 
 fn near_duplicate_text(left: &str, right: &str) -> bool {
@@ -1150,7 +1349,9 @@ fn drop_intro_like_duplicates(blocks: &mut Vec<String>, title: &str, subtitle: &
 
 fn first_text(document: &Html, selectors: &[&str]) -> Option<String> {
     for selector in selectors {
-        let selector = Selector::parse(selector).ok()?;
+        let Ok(selector) = Selector::parse(selector) else {
+            continue;
+        };
         let value = document.select(&selector).find_map(|node| {
             let attr_content = node.value().attr("content").map(clean_whitespace);
             let text_content =
@@ -1166,7 +1367,9 @@ fn first_text(document: &Html, selectors: &[&str]) -> Option<String> {
 
 fn first_attr(document: &Html, selectors: &[&str], attr: &str) -> Option<String> {
     for selector in selectors {
-        let selector = Selector::parse(selector).ok()?;
+        let Ok(selector) = Selector::parse(selector) else {
+            continue;
+        };
         if let Some(value) = document
             .select(&selector)
             .find_map(|node| node.value().attr(attr))
@@ -1215,7 +1418,7 @@ fn absolute_url(raw_href: &str) -> String {
 }
 
 fn collect_text(node: ElementRef<'_>) -> String {
-    node.text().collect::<Vec<_>>().join("")
+    node.text().collect::<String>()
 }
 
 static RE_PUNCTUATION: LazyLock<Regex> =
@@ -1430,5 +1633,328 @@ mod tests {
     #[test]
     fn strip_markup_handles_nested_tags() {
         assert_eq!(strip_markup("<div><p>hello</p></div>"), "hello");
+    }
+
+    // ── HTML fixture helpers ──
+
+    /// Minimal taz-like article HTML for extraction tests.
+    fn fixture_full_article() -> &'static str {
+        r#"<!DOCTYPE html>
+<html>
+<head>
+    <title>Klimawandel bedroht Küsten | taz.de</title>
+    <meta property="og:title" content="Klimawandel bedroht Küsten">
+    <meta name="description" content="Steigende Meeresspiegel gefährden Millionen Menschen an den Küsten weltweit.">
+    <meta property="article:author" content="Maria Schmidt">
+    <meta property="article:section" content="Umwelt">
+    <meta property="article:published_time" content="2025-03-15T10:30:00+01:00">
+</head>
+<body>
+<article>
+    <h1>Klimawandel bedroht Küsten</h1>
+    <p>Steigende Meeresspiegel gefährden Millionen Menschen an den Küsten weltweit. Wissenschaftler warnen vor den Folgen des Klimawandels.</p>
+    <p>Die Temperaturen steigen seit Jahrzehnten kontinuierlich an, und die Auswirkungen werden immer deutlicher sichtbar in allen Regionen der Welt.</p>
+    <h2>Forschungsergebnisse</h2>
+    <p>Neue Studien zeigen, dass der Meeresspiegel bis zum Ende des Jahrhunderts um bis zu einem Meter steigen könnte, was dramatische Folgen hätte.</p>
+    <p>Besonders betroffen sind Inselstaaten im Pazifik, die bereits heute mit den Auswirkungen kämpfen und internationale Hilfe benötigen dringend.</p>
+    <p>Die internationale Gemeinschaft muss schnell handeln, um die schlimmsten Auswirkungen abzuwenden und betroffenen Regionen zu helfen bei der Anpassung.</p>
+    <p>Experten fordern eine drastische Reduktion der Treibhausgasemissionen und massive Investitionen in erneuerbare Energien als einzigen Ausweg aus der Krise.</p>
+</article>
+</body>
+</html>"#
+    }
+
+    fn fixture_minimal_article() -> &'static str {
+        r#"<!DOCTYPE html>
+<html>
+<head><title>Kurzmeldung | taz.de</title></head>
+<body>
+<article>
+    <h1>Kurzmeldung</h1>
+    <p>Ein kurzer Absatz.</p>
+</article>
+</body>
+</html>"#
+    }
+
+    fn fixture_json_ld_date() -> &'static str {
+        r#"<!DOCTYPE html>
+<html>
+<head><title>Test</title>
+<script type="application/ld+json">{"@type":"NewsArticle","datePublished":"2025-06-20T08:00:00Z"}</script>
+</head>
+<body>
+<article>
+    <p>Placeholder text that is long enough to pass the minimum length check for paragraph extraction in the body parser.</p>
+</article>
+</body>
+</html>"#
+    }
+
+    fn fixture_date_in_url() -> &'static str {
+        "https://taz.de/Artikel/!2025/04/10/some-slug/"
+    }
+
+    fn fixture_section_in_cp() -> &'static str {
+        r#"<html><head></head><body><script>cp: "Redaktion/Politik", page: "artikel"</script></body></html>"#
+    }
+
+    // ── extract_body tests ──
+
+    #[test]
+    fn extract_body_finds_paragraphs_in_article_tag() {
+        let doc = Html::parse_document(fixture_full_article());
+        let body = extract_body(&doc).unwrap();
+        assert!(body.contains("Temperaturen steigen"), "should contain body paragraph");
+        assert!(body.contains("## Forschungsergebnisse"), "should preserve h2 as markdown heading");
+        assert!(!body.contains("<p>"), "should not contain raw HTML tags");
+    }
+
+    #[test]
+    fn extract_body_rejects_too_short_article() {
+        let doc = Html::parse_document(fixture_minimal_article());
+        // The minimal fixture has only one short paragraph — extract_body should still
+        // return what it finds (or empty). The 80-word check is in fetch_article, not extract_body.
+        let result = extract_body(&doc);
+        // With only "Ein kurzer Absatz." (< 45 chars), extract_body should fail
+        assert!(result.is_err(), "should fail for article with no substantial paragraphs");
+    }
+
+    #[test]
+    fn extract_body_deduplicates_identical_paragraphs() {
+        let html = r#"<html><body><article>
+            <p>Dies ist ein langer Absatz der mindestens fünfundvierzig Zeichen haben muss um gezählt zu werden.</p>
+            <p>Dies ist ein langer Absatz der mindestens fünfundvierzig Zeichen haben muss um gezählt zu werden.</p>
+            <p>Ein zweiter unterschiedlicher Absatz der ebenfalls lang genug sein muss für die Extraktion.</p>
+        </article></body></html>"#;
+        let doc = Html::parse_document(html);
+        let body = extract_body(&doc).unwrap();
+        let count = body.matches("mindestens fünfundvierzig").count();
+        assert_eq!(count, 1, "duplicate paragraph should be removed");
+    }
+
+    // ── first_text / first_attr tests ──
+
+    #[test]
+    fn first_text_extracts_h1() {
+        let doc = Html::parse_document(fixture_full_article());
+        let title = first_text(&doc, selectors::TITLE);
+        assert_eq!(title.as_deref(), Some("Klimawandel bedroht Küsten"));
+    }
+
+    #[test]
+    fn first_text_falls_back_to_og_title() {
+        let html = r#"<html><head><meta property="og:title" content="OG Titel"></head><body></body></html>"#;
+        let doc = Html::parse_document(html);
+        let title = first_text(&doc, selectors::TITLE);
+        assert_eq!(title.as_deref(), Some("OG Titel"));
+    }
+
+    #[test]
+    fn first_text_returns_none_when_no_match() {
+        let doc = Html::parse_document("<html><body></body></html>");
+        assert!(first_text(&doc, selectors::TITLE).is_none());
+    }
+
+    #[test]
+    fn first_attr_extracts_meta_content() {
+        let doc = Html::parse_document(fixture_full_article());
+        let author = first_attr(&doc, selectors::AUTHOR, "content");
+        assert_eq!(author.as_deref(), Some("Maria Schmidt"));
+    }
+
+    #[test]
+    fn first_attr_extracts_section() {
+        let doc = Html::parse_document(fixture_full_article());
+        let section = first_attr(&doc, selectors::SECTION, "content");
+        assert_eq!(section.as_deref(), Some("Umwelt"));
+    }
+
+    // ── date extraction tests ──
+
+    #[test]
+    fn extract_date_from_meta_tag() {
+        let doc = Html::parse_document(fixture_full_article());
+        let date = extract_date(&doc, fixture_full_article(), "https://taz.de/test/");
+        assert_eq!(date.as_deref(), Some("2025-03-15T10:30:00+01:00"));
+    }
+
+    #[test]
+    fn extract_date_from_json_ld_fixture() {
+        let html = fixture_json_ld_date();
+        let result = extract_date_from_json_ld(html);
+        assert_eq!(result.as_deref(), Some("2025-06-20T08:00:00Z"));
+    }
+
+    #[test]
+    fn extract_date_from_url_fixture() {
+        let result = extract_date_from_url(fixture_date_in_url());
+        assert_eq!(result.as_deref(), Some("2025-04-10"));
+    }
+
+    #[test]
+    fn extract_date_from_german_text() {
+        let html = "<html><body>Veröffentlicht am 15.03.2025 um 10 Uhr</body></html>";
+        let result = extract_date_from_text(html);
+        assert_eq!(result.as_deref(), Some("15.03.2025"));
+    }
+
+    // ── section extraction tests ──
+
+    #[test]
+    fn extract_section_from_cp_variable() {
+        let result = extract_section_from_html(fixture_section_in_cp());
+        assert_eq!(result.as_deref(), Some("Politik"));
+    }
+
+    #[test]
+    fn extract_section_returns_none_without_cp() {
+        assert!(extract_section_from_html("<html><body>no cp here</body></html>").is_none());
+    }
+
+    // ── build_clean_text tests ──
+
+    #[test]
+    fn build_clean_text_includes_all_metadata() {
+        let result = build_clean_text("Titel", "Untertitel", "Autor", "2025-01-01", "Body text hier.");
+        assert!(result.contains("Titel"), "should contain title");
+        assert!(result.contains("Untertitel"), "should contain subtitle");
+        assert!(result.contains("Von Autor"), "should contain author with Von prefix");
+        assert!(result.contains("2025-01-01"), "should contain date");
+        assert!(result.contains("Body text hier."), "should contain body");
+    }
+
+    #[test]
+    fn build_clean_text_omits_empty_subtitle() {
+        let result = build_clean_text("Titel", "", "Autor", "2025-01-01", "Body.");
+        assert!(!result.contains("\n\n\n"), "should not have double blank lines from empty subtitle");
+    }
+
+    #[test]
+    fn build_clean_text_removes_duplicate_title_from_body() {
+        let result = build_clean_text("Titel", "Sub", "", "", "Titel\n\nActual body content here.");
+        // The title appearing in the body should be deduplicated
+        let title_count = result.matches("Titel").count();
+        assert!(title_count <= 2, "title should not appear more than twice (header + possible sub overlap)");
+    }
+
+    // ── dedupe_lines tests ──
+
+    #[test]
+    fn dedupe_lines_removes_exact_duplicates() {
+        let mut lines = vec!["aaa".to_owned(), "bbb".to_owned(), "aaa".to_owned()];
+        dedupe_lines(&mut lines);
+        assert_eq!(lines, vec!["aaa", "bbb"]);
+    }
+
+    // ── looks_like_article_title tests ──
+
+    #[test]
+    fn looks_like_article_title_accepts_normal_title() {
+        assert!(looks_like_article_title("Klimawandel bedroht Küsten"));
+    }
+
+    #[test]
+    fn looks_like_article_title_rejects_short_text() {
+        assert!(!looks_like_article_title("Mehr"));
+    }
+
+    // ── source_label tests ──
+
+    #[test]
+    fn source_label_startseite_for_base_url() {
+        assert_eq!(source_label("https://taz.de"), "Startseite");
+        assert_eq!(source_label("https://taz.de/"), "Startseite");
+    }
+
+    #[test]
+    fn source_label_returns_path_for_section() {
+        assert_eq!(source_label("https://taz.de/Politik/"), "Politik");
+    }
+
+    // ── infer_section_from_url ──
+
+    #[test]
+    fn infer_section_from_url_extracts_first_segment() {
+        let result = infer_section_from_url("https://taz.de/Politik/!1234567/");
+        assert_eq!(result, "Politik");
+    }
+
+    // ── is_interview_line tests ──
+
+    #[test]
+    fn is_interview_line_detects_taz_prefix() {
+        assert!(is_interview_line("taz: Wie waren Sie als Kind?"));
+    }
+
+    #[test]
+    fn is_interview_line_detects_speaker_name() {
+        assert!(is_interview_line("Reynolds: Ja, das stimmt."));
+        assert!(is_interview_line("Jason Reynolds: Ich sehe mich selbst."));
+    }
+
+    #[test]
+    fn is_interview_line_rejects_normal_text() {
+        assert!(!is_interview_line("Dies ist ein normaler Absatz ohne Sprecherkennzeichnung."));
+    }
+
+    #[test]
+    fn is_interview_line_rejects_non_name_prefix() {
+        // Lowercase words before colon should not match
+        assert!(!is_interview_line("das problem: es gibt keine lösung für dieses thema."));
+        // Numbers before colon should not match
+        assert!(!is_interview_line("2025: Ein Jahr der Veränderungen in der Politik."));
+    }
+
+    // ── extract_body interview & figure tests ──
+
+    #[test]
+    fn extract_body_keeps_short_interview_questions() {
+        let html = r#"<html><body><article>
+            <p><strong>taz: Wie waren Sie als Kind?</strong></p>
+            <p>Reynolds: Ich war empfindsam, und zwar auf eine beständige und geerdete Art und Weise, die mich überall hinführte.</p>
+            <p><strong>taz: Schon vom ersten Buch an?</strong></p>
+            <p>Reynolds: Ja, weil es so lange gedauert hatte, überhaupt dahin zu kommen und das war wirklich bemerkenswert!</p>
+        </article></body></html>"#;
+        let doc = Html::parse_document(html);
+        let body = extract_body(&doc).unwrap();
+        assert!(body.contains("taz: Wie waren Sie als Kind?"), "should keep short taz: question");
+        assert!(body.contains("taz: Schon vom ersten Buch an?"), "should keep another short question");
+    }
+
+    #[test]
+    fn extract_body_excludes_figure_captions() {
+        let html = r#"<html><body><article>
+            <figure>
+                <img src="photo.jpg" alt="Portrait von Jason Reynolds">
+                <figcaption>
+                    <p>In seiner Kindheit gab es keine Bücher, sagt Jason Reynolds.</p>
+                    <span>Foto: Anna Tiessen</span>
+                </figcaption>
+            </figure>
+            <p>Dies ist der eigentliche Artikeltext, der lang genug sein muss, um die Mindestlänge zu überschreiten.</p>
+        </article></body></html>"#;
+        let doc = Html::parse_document(html);
+        let body = extract_body(&doc).unwrap();
+        assert!(!body.contains("Foto: Anna Tiessen"), "should not contain photo credit");
+        assert!(!body.contains("keine Bücher, sagt"), "should not contain figcaption text");
+        assert!(body.contains("eigentliche Artikeltext"), "should contain actual body text");
+    }
+
+    #[test]
+    fn extract_body_excludes_bio_sidebar() {
+        let html = r#"<html><body><article>
+            <p>Haupttext des Artikels der lang genug sein muss, um die Mindestlänge von fünfundvierzig Zeichen zu erreichen.</p>
+            <div class="webelement_bio webelement-pos-7">
+                <p><strong>Der Autor</strong></p>
+                <p>Jason Reynolds, 42, wuchs in einem Vorort von Washington D.C. auf und studierte Literaturwissenschaften.</p>
+            </div>
+            <p>Noch ein Absatz im Haupttext der ebenfalls lang genug ist, um mitgenommen zu werden und nicht gefiltert.</p>
+        </article></body></html>"#;
+        let doc = Html::parse_document(html);
+        let body = extract_body(&doc).unwrap();
+        assert!(!body.contains("Der Autor"), "should not contain bio heading");
+        assert!(!body.contains("Literaturwissenschaften"), "should not contain bio text");
+        assert!(body.contains("Haupttext des Artikels"), "should contain body text");
     }
 }
