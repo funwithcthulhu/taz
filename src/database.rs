@@ -421,6 +421,23 @@ impl Database {
         Ok(())
     }
 
+    /// Delete multiple articles by their IDs in a single transaction.
+    /// Returns the number of articles actually deleted.
+    pub fn delete_articles_batch(&self, ids: &[i64]) -> Result<usize> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let conn = self.conn()?;
+        conn.execute_batch("BEGIN")?;
+        let mut deleted = 0usize;
+        for id in ids {
+            conn.execute("DELETE FROM articles WHERE id = ?1", params![id])?;
+            deleted += conn.changes() as usize;
+        }
+        conn.execute_batch("COMMIT")?;
+        Ok(deleted)
+    }
+
     /// Run PRAGMA integrity_check and return the result string.
     pub fn integrity_check(&self) -> Result<String> {
         let result: String = self.read()?.query_row(

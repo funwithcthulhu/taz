@@ -124,6 +124,7 @@ export component AppWindow inherits Window {
     callback library-select-visible-for-upload();
     callback library-clear-upload-selection();
     callback library-upload-selected();
+    callback library-delete-selected();
     callback lingq-open-settings();
     callback lingq-close-settings();
     callback lingq-save-token();
@@ -515,6 +516,7 @@ export component AppWindow inherits Window {
                                 CheckBox { text: "Not uploaded"; checked <=> root.lingq-only-not-uploaded; }
                                 Button { text: "Select visible"; clicked => { root.library-select-visible-for-upload(); } }
                                 Button { text: "Clear"; clicked => { root.library-clear-upload-selection(); } }
+                                Button { text: "Delete Selected"; clicked => { root.library-delete-selected(); } }
                                 Button { text: "Upload"; clicked => { root.library-upload-selected(); } }
                                 Rectangle { }
                                 Button { text: "Settings"; clicked => { root.lingq-open-settings(); } min-width: 60px; }

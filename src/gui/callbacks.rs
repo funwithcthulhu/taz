@@ -200,6 +200,12 @@ pub(super) fn wire_callbacks(window: &AppWindow, state: &Rc<RefCell<AppState>>) 
     });
 
     let state_clone = state.clone();
+    window.on_library_delete_selected(move || {
+        let mut app = state_clone.borrow_mut();
+        app.delete_selected();
+    });
+
+    let state_clone = state.clone();
     window.on_lingq_open_settings(move || {
         let mut app = state_clone.borrow_mut();
         app.lq.show_settings = true;

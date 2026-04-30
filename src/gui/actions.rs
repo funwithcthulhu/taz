@@ -312,12 +312,28 @@ impl AppState {
                 let mut skipped_out_of_range = 0usize;
                 let mut failed = Vec::new();
 
-                for section_id in section_ids {
+                for (section_idx, section_id) in section_ids.iter().enumerate() {
+                    if cancel.load(Ordering::Relaxed) {
+                        break;
+                    }
+
                     let section = scraper
-                        .section_by_id(&section_id)
+                        .section_by_id(section_id)
                         .ok_or_else(|| format!("unknown section '{section_id}'"))?;
                     let mut accepted_for_section = 0usize;
                     let mut consecutive_old = 0usize;
+
+                    // Show which section is being scanned so the user knows it's not stuck
+                    let _ = tx.send(AppEvent::FetchProgress(FetchProgress {
+                        label: format!(
+                            "Scanning {} ({}/{})",
+                            section.label,
+                            section_idx + 1,
+                            section_ids.len()
+                        ),
+                        completed: saved.min(max_articles),
+                        total: max_articles,
+                    }));
 
                     let summaries = scraper
                         .browse_section(section, discovery_limit)
@@ -442,12 +458,26 @@ impl AppState {
                 let mut skipped_existing = 0usize;
                 let mut failed = Vec::new();
 
-                for section_id in &section_ids {
+                for (section_idx, section_id) in section_ids.iter().enumerate() {
+                    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                        break;
+                    }
                     let Some(section) = scraper.section_by_id(section_id) else {
                         continue;
                     };
                     let mut accepted_for_section = 0usize;
                     let mut consecutive_old = 0usize;
+
+                    let _ = tx.send(AppEvent::FetchProgress(FetchProgress {
+                        label: format!(
+                            "Auto-fetch: scanning {} ({}/{})",
+                            section.label,
+                            section_idx + 1,
+                            section_ids.len()
+                        ),
+                        completed: saved.min(max_articles),
+                        total: max_articles,
+                    }));
 
                     let summaries = match scraper.browse_section(section, discovery_limit).await {
                         Ok(s) => s,
@@ -536,6 +566,28 @@ impl AppState {
             };
             let _ = tx.send(event);
         });
+    }
+
+    pub(super) fn delete_selected(&mut self) {
+        if self.lq.selected_articles.is_empty() {
+            self.set_status("Select at least one article to delete.");
+            return;
+        }
+        let ids: Vec<i64> = self.lq.selected_articles.iter().copied().collect();
+        let count = ids.len();
+        match self.db.delete_articles_batch(&ids) {
+            Ok(deleted) => {
+                self.lq.selected_articles.clear();
+                self.library.selected_article_id = None;
+                self.set_status(format!("Deleted {deleted} of {count} selected article(s)."));
+                self.refresh_saved_urls();
+                self.refresh_stats();
+                self.load_library();
+            }
+            Err(err) => {
+                self.set_status(format!("Delete failed: {err:#}"));
+            }
+        }
     }
 
     pub(super) fn upload_selected(&mut self) {

@@ -529,12 +529,19 @@ impl TazClient {
             ));
         }
 
+        let mut first_source = true;
         while let Some((source_url, fallback_section, source_kind)) = queued_sources.pop_front() {
             if !seen_sources.insert(source_url.clone()) {
                 continue;
             }
             if seen_sources.len() > max_sources || articles.len() >= limit {
                 break;
+            }
+            // Throttle between source page fetches to avoid hammering taz.de
+            if first_source {
+                first_source = false;
+            } else {
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
             }
 
             let html = self.fetch_html(&source_url).await?;
