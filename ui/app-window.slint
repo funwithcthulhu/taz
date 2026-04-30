@@ -117,6 +117,9 @@ export component AppWindow inherits Window {
     callback browse-bulk-clear();
     callback browse-run-bulk-fetch();
     callback library-apply-filters();
+    callback library-set-only-not-uploaded(bool);
+    callback library-set-min-words(string);
+    callback library-set-max-words(string);
     callback library-toggle-select(int);
     callback library-select-article(int);
     callback library-delete-article(int);
@@ -126,6 +129,9 @@ export component AppWindow inherits Window {
     callback library-upload-selected();
     callback library-delete-selected();
     callback lingq-open-settings();
+    callback lingq-set-only-not-uploaded(bool);
+    callback lingq-set-min-words(string);
+    callback lingq-set-max-words(string);
     callback lingq-close-settings();
     callback lingq-save-token();
     callback lingq-login();
@@ -479,9 +485,25 @@ export component AppWindow inherits Window {
                                 ComboBox { model: root.heading-labels; current-index <=> root.library-heading-index; min-width: 110px; }
                                 ComboBox { model: root.section-labels; current-index <=> root.library-section-index; min-width: 110px; }
                                 ComboBox { model: root.sort-labels; current-index <=> root.library-sort-index; min-width: 90px; max-width: 90px; }
-                                LineEdit { text <=> root.library-min-words; placeholder-text: "Min words"; min-width: 72px; max-width: 72px; }
-                                LineEdit { text <=> root.library-max-words; placeholder-text: "Max words"; min-width: 72px; max-width: 72px; }
-                                CheckBox { text: "Not uploaded"; checked <=> root.library-only-not-uploaded; }
+                                LineEdit {
+                                    text <=> root.library-min-words;
+                                    placeholder-text: "Min words";
+                                    min-width: 72px;
+                                    max-width: 72px;
+                                    edited => { root.library-set-min-words(self.text); }
+                                }
+                                LineEdit {
+                                    text <=> root.library-max-words;
+                                    placeholder-text: "Max words";
+                                    min-width: 72px;
+                                    max-width: 72px;
+                                    edited => { root.library-set-max-words(self.text); }
+                                }
+                                CheckBox {
+                                    text: "Not uploaded";
+                                    checked <=> root.library-only-not-uploaded;
+                                    toggled => { root.library-set-only-not-uploaded(self.checked); }
+                                }
                                 Button { text: "Apply"; clicked => { root.library-apply-filters(); } }
                                 Rectangle { }
                             }
@@ -510,10 +532,32 @@ export component AppWindow inherits Window {
                                         vertical-alignment: center;
                                     }
                                 }
-                                ComboBox { model: root.collection-labels; current-index <=> root.lingq-collection-index; min-width: 180px; }
-                                LineEdit { text <=> root.lingq-min-words; placeholder-text: "Min words"; min-width: 72px; max-width: 72px; }
-                                LineEdit { text <=> root.lingq-max-words; placeholder-text: "Max words"; min-width: 72px; max-width: 72px; }
-                                CheckBox { text: "Not uploaded"; checked <=> root.lingq-only-not-uploaded; }
+                                ComboBox {
+                                    model: root.collection-labels;
+                                    current-index <=> root.lingq-collection-index;
+                                    min-width: 220px;
+                                    max-width: 320px;
+                                    preferred-width: 280px;
+                                }
+                                LineEdit {
+                                    text <=> root.lingq-min-words;
+                                    placeholder-text: "Min words";
+                                    min-width: 72px;
+                                    max-width: 72px;
+                                    edited => { root.lingq-set-min-words(self.text); }
+                                }
+                                LineEdit {
+                                    text <=> root.lingq-max-words;
+                                    placeholder-text: "Max words";
+                                    min-width: 72px;
+                                    max-width: 72px;
+                                    edited => { root.lingq-set-max-words(self.text); }
+                                }
+                                CheckBox {
+                                    text: "Not uploaded";
+                                    checked <=> root.lingq-only-not-uploaded;
+                                    toggled => { root.lingq-set-only-not-uploaded(self.checked); }
+                                }
                                 Button { text: "Select visible"; clicked => { root.library-select-visible-for-upload(); } }
                                 Button { text: "Clear"; clicked => { root.library-clear-upload-selection(); } }
                                 Button { text: "Delete Selected"; clicked => { root.library-delete-selected(); } }

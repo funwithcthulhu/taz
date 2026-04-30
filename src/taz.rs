@@ -79,14 +79,28 @@ mod selectors {
         ".hide-paywall",
     ];
 
-    // Text patterns in the HTML that indicate paywall-truncated content
+    // Text patterns in the HTML that indicate paywall-truncated content.
+    // Keep these strict: broad support / donation copy should not count.
     pub const PAYWALL_TEXT_MARKERS: &[&str] = &[
-        "taz zahl ich",
         "Lesen Sie diesen Artikel mit taz-zahl-ich",
         "Dieser Artikel ist für Abonnent",
         "Für diesen Artikel müssen Sie",
-        "Jetzt taz zahl ich Mitglied werden",
-        "Ab jetzt frei lesen",
+        "nur für Abonnent",
+        "jetzt weiterlesen mit taz-zahl-ich",
+        "um diesen artikel vollständig zu lesen",
+        "mit einem abo weiterlesen",
+    ];
+
+    // Text that commonly appears in the voluntary support popup and should
+    // explicitly suppress paywall classification.
+    pub const SUPPORT_OVERLAY_TEXT_MARKERS: &[&str] = &[
+        "ohne paywall",
+        "freier zugang zu unabhängiger presse",
+        "damit das so bleibt, brauchen wir ihre unterstützung",
+        "schon ein kleiner beitrag hilft",
+        "fördern sie jetzt den taz-journalismus",
+        "gerade nicht",
+        "schon dabei!",
     ];
 }
 
@@ -976,21 +990,34 @@ fn is_retryable_status(status: StatusCode) -> bool {
 
 /// Check whether the page contains paywall indicators (CSS elements or text markers).
 fn detect_paywall(document: &Html, html: &str) -> bool {
+    let html_lower = html.to_lowercase();
+
+    // If the page explicitly says access is free and asks only for support,
+    // don't classify it as paywalled even if an overlay is present.
+    let has_support_overlay_text = selectors::SUPPORT_OVERLAY_TEXT_MARKERS
+        .iter()
+        .any(|marker| html_lower.contains(&marker.to_lowercase()));
+
+    let has_paywall_text = selectors::PAYWALL_TEXT_MARKERS
+        .iter()
+        .any(|marker| html_lower.contains(&marker.to_lowercase()));
+
+    if has_support_overlay_text && !has_paywall_text {
+        return false;
+    }
+
     // Check for paywall CSS selectors
     for selector_str in selectors::PAYWALL {
         let Ok(selector) = Selector::parse(selector_str) else { continue };
         if document.select(&selector).next().is_some() {
+            if has_support_overlay_text && !has_paywall_text {
+                return false;
+            }
             return true;
         }
     }
-    // Check for paywall text markers in raw HTML (faster than parsing)
-    let html_lower = html.to_lowercase();
-    for marker in selectors::PAYWALL_TEXT_MARKERS {
-        if html_lower.contains(&marker.to_lowercase()) {
-            return true;
-        }
-    }
-    false
+
+    has_paywall_text
 }
 
 /// Tags whose `<p>` / `<li>` descendants should be excluded from the article

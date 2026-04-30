@@ -119,6 +119,28 @@ pub(super) fn wire_callbacks(window: &AppWindow, state: &Rc<RefCell<AppState>>) 
     });
 
     let state_clone = state.clone();
+    window.on_library_set_only_not_uploaded(move |checked| {
+        let mut app = state_clone.borrow_mut();
+        app.library.only_not_uploaded = checked;
+        app.save_settings();
+        app.sync_to_window();
+    });
+
+    let state_clone = state.clone();
+    window.on_library_set_min_words(move |value| {
+        let mut app = state_clone.borrow_mut();
+        app.library.min_words = value.to_string();
+        app.save_settings();
+    });
+
+    let state_clone = state.clone();
+    window.on_library_set_max_words(move |value| {
+        let mut app = state_clone.borrow_mut();
+        app.library.max_words = value.to_string();
+        app.save_settings();
+    });
+
+    let state_clone = state.clone();
     window.on_library_toggle_select(move |index| {
         let mut app = state_clone.borrow_mut();
         if let Some(article_id) = app
@@ -210,6 +232,28 @@ pub(super) fn wire_callbacks(window: &AppWindow, state: &Rc<RefCell<AppState>>) 
         let mut app = state_clone.borrow_mut();
         app.lq.show_settings = true;
         app.sync_to_window();
+    });
+
+    let state_clone = state.clone();
+    window.on_lingq_set_only_not_uploaded(move |checked| {
+        let mut app = state_clone.borrow_mut();
+        app.lq.only_not_uploaded = checked;
+        app.save_settings();
+        app.sync_to_window();
+    });
+
+    let state_clone = state.clone();
+    window.on_lingq_set_min_words(move |value| {
+        let mut app = state_clone.borrow_mut();
+        app.lq.min_words = value.to_string();
+        app.save_settings();
+    });
+
+    let state_clone = state.clone();
+    window.on_lingq_set_max_words(move |value| {
+        let mut app = state_clone.borrow_mut();
+        app.lq.max_words = value.to_string();
+        app.save_settings();
     });
 
     let state_clone = state.clone();

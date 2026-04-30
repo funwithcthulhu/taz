@@ -9,7 +9,7 @@
 ; Output: installer\output\taz-reader-setup.exe
 
 #define MyAppName "taz Reader"
-#define MyAppVersion "1.1.0"
+#define MyAppVersion "1.1.1"
 #define MyAppPublisher "Tom Boeding"
 #define MyAppExeName "taz_lingq_tool.exe"
 

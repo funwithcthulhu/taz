@@ -573,13 +573,36 @@ impl AppState {
             self.set_status("Select at least one article to delete.");
             return;
         }
-        let ids: Vec<i64> = self.lq.selected_articles.iter().copied().collect();
-        let count = ids.len();
-        match self.db.delete_articles_batch(&ids) {
+        let visible_selected_ids: Vec<i64> = self
+            .filtered_library_articles()
+            .into_iter()
+            .filter(|article| self.lq.selected_articles.contains(&article.id))
+            .map(|article| article.id)
+            .collect();
+        if visible_selected_ids.is_empty() {
+            self.set_status("No currently visible selected articles to delete.");
+            return;
+        }
+        let hidden_selected_count = self
+            .lq
+            .selected_articles
+            .len()
+            .saturating_sub(visible_selected_ids.len());
+        let count = visible_selected_ids.len();
+        match self.db.delete_articles_batch(&visible_selected_ids) {
             Ok(deleted) => {
-                self.lq.selected_articles.clear();
+                for id in &visible_selected_ids {
+                    self.lq.selected_articles.remove(id);
+                }
                 self.library.selected_article_id = None;
-                self.set_status(format!("Deleted {deleted} of {count} selected article(s)."));
+                let hidden_suffix = if hidden_selected_count > 0 {
+                    format!(" Left {hidden_selected_count} hidden selection(s) untouched.")
+                } else {
+                    String::new()
+                };
+                self.set_status(format!(
+                    "Deleted {deleted} of {count} visible selected article(s).{hidden_suffix}"
+                ));
                 self.refresh_saved_urls();
                 self.refresh_stats();
                 self.load_library();
