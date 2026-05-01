@@ -22,6 +22,7 @@ use std::{
     },
 };
 use tokio::runtime::Runtime;
+use tokio::task::JoinHandle;
 
 slint::include_modules!();
 
@@ -228,6 +229,7 @@ struct AppState {
     stats: Option<LibraryStats>,
     progress: Option<FetchProgress>,
     save_progress: Option<FetchProgress>,
+    current_job: Option<JoinHandle<()>>,
     cancel_flag: Arc<AtomicBool>,
     /// Signals all background tasks to stop when the app is shutting down.
     shutdown_flag: Arc<AtomicBool>,
@@ -243,6 +245,32 @@ struct AppState {
 // ── Core AppState helpers ──
 
 impl AppState {
+    fn background_job_active(&self) -> bool {
+        self.current_job.is_some() || self.progress.is_some() || self.save_progress.is_some()
+    }
+
+    fn set_current_job(&mut self, handle: JoinHandle<()>) {
+        self.current_job = Some(handle);
+    }
+
+    fn clear_current_job(&mut self) {
+        self.current_job = None;
+    }
+
+    fn cancel_active_job(&mut self) -> bool {
+        self.cancel_flag.store(true, Ordering::Relaxed);
+        let aborted = if let Some(handle) = self.current_job.take() {
+            handle.abort();
+            true
+        } else {
+            false
+        };
+        self.progress = None;
+        self.save_progress = None;
+        self.dirty.progress = true;
+        aborted
+    }
+
     /// Mark library + preview dirty and update selected article.
     /// Loads the full article text from DB for the preview pane.
     fn select_article(&mut self, id: Option<i64>) {
@@ -367,6 +395,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
         stats: None,
         progress: None,
         save_progress: None,
+        current_job: None,
         cancel_flag: Arc::new(AtomicBool::new(false)),
         shutdown_flag: Arc::new(AtomicBool::new(false)),
         settings_dirty: false,

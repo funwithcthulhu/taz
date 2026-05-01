@@ -18,13 +18,14 @@ component Panel inherits Rectangle {
 component TextBtn inherits Rectangle {
     in property <string> label;
     in property <brush> text-color: #7ea8e0;
+    in property <bool> enabled: true;
     callback clicked;
     height: 20px;
     width: btn-text.preferred-width + 12px;
     border-radius: 4px;
-    background: ta.has-hover ? #ffffff10 : transparent;
-    btn-text := Text { text: root.label; color: ta.has-hover ? #ffffff : root.text-color; font-size: 11px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
-    ta := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+    background: root.enabled && ta.has-hover ? #ffffff10 : transparent;
+    btn-text := Text { text: root.label; color: root.enabled ? (ta.has-hover ? #ffffff : root.text-color) : #607089; font-size: 11px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+    ta := TouchArea { enabled: root.enabled; mouse-cursor: root.enabled ? pointer : default; clicked => { root.clicked(); } }
 }
 
 // Tiny preset button for date range shortcuts
@@ -108,6 +109,8 @@ export component AppWindow inherits Window {
     callback browse-set-only-new(bool);
     callback browse-refresh();
     callback browse-load-more();
+    callback browse-set-date-from(string);
+    callback browse-set-date-to(string);
     callback browse-toggle-article(int);
     callback browse-select-all-new();
     callback browse-clear-selection();
@@ -326,7 +329,7 @@ export component AppWindow inherits Window {
                                     }
                                     Button { text: "Select all"; clicked => { root.browse-select-all-new(); } }
                                     Button { text: "Clear"; clicked => { root.browse-clear-selection(); } }
-                                    Button { text: "Save selected"; clicked => { root.browse-save-selected(); } }
+                                    Button { text: "Save selected"; enabled: !root.progress-visible; clicked => { root.browse-save-selected(); } }
                                     Rectangle { }
                                     Button { text: "Refresh"; clicked => { root.browse-refresh(); } }
                                     Button { text: "More"; clicked => { root.browse-load-more(); } }
@@ -337,7 +340,7 @@ export component AppWindow inherits Window {
 
                         // taz Search
                         Panel {
-                            height: 40px;
+                            height: 44px;
                             clip: true;
                             HorizontalLayout {
                                 padding: 6px;
@@ -350,6 +353,24 @@ export component AppWindow inherits Window {
                                     placeholder-text: "e.g. Klimawandel, Ukraine, Migration...";
                                     horizontal-stretch: 1;
                                     edited => { root.taz-set-search-query(self.text); }
+                                    accepted => { root.taz-search(); }
+                                }
+                                Text { text: "From"; color: #8190ab; font-size: 11px; vertical-alignment: center; }
+                                LineEdit {
+                                    text <=> root.browse-date-from;
+                                    placeholder-text: "YYYY-MM-DD";
+                                    min-width: 94px;
+                                    max-width: 94px;
+                                    edited => { root.browse-set-date-from(self.text); }
+                                    accepted => { root.taz-search(); }
+                                }
+                                Text { text: "To"; color: #8190ab; font-size: 11px; vertical-alignment: center; }
+                                LineEdit {
+                                    text <=> root.browse-date-to;
+                                    placeholder-text: "YYYY-MM-DD";
+                                    min-width: 94px;
+                                    max-width: 94px;
+                                    edited => { root.browse-set-date-to(self.text); }
                                     accepted => { root.taz-search(); }
                                 }
                                 Button { text: "Search"; clicked => { root.taz-search(); } }
@@ -369,9 +390,9 @@ export component AppWindow inherits Window {
                                     spacing: 5px;
                                     Text { text: "Bulk"; color: white; font-size: 13px; font-weight: 800; vertical-alignment: center; }
                                     Text { text: "From"; color: #8190ab; font-size: 11px; vertical-alignment: center; }
-                                    LineEdit { text <=> root.browse-date-from; placeholder-text: "YYYY-MM-DD"; min-width: 100px; max-width: 100px; }
+                                    LineEdit { text <=> root.browse-date-from; placeholder-text: "YYYY-MM-DD"; min-width: 100px; max-width: 100px; edited => { root.browse-set-date-from(self.text); } }
                                     Text { text: "To"; color: #8190ab; font-size: 11px; vertical-alignment: center; }
-                                    LineEdit { text <=> root.browse-date-to; placeholder-text: "YYYY-MM-DD"; min-width: 100px; max-width: 100px; }
+                                    LineEdit { text <=> root.browse-date-to; placeholder-text: "YYYY-MM-DD"; min-width: 100px; max-width: 100px; edited => { root.browse-set-date-to(self.text); } }
                                     Text { text: "Max"; color: #8190ab; font-size: 11px; vertical-alignment: center; }
                                     LineEdit { text <=> root.bulk-max-articles; placeholder-text: "60"; min-width: 40px; max-width: 40px; }
                                     Text { text: "Per sect"; color: #8190ab; font-size: 11px; vertical-alignment: center; }
@@ -381,7 +402,7 @@ export component AppWindow inherits Window {
                                     Button { text: root.bulk-sections-label; clicked => { root.show-bulk-sections = !root.show-bulk-sections; } min-width: 100px; }
                                     Button { text: "All"; clicked => { root.browse-bulk-select-all(); } }
                                     Button { text: "None"; clicked => { root.browse-bulk-clear(); } }
-                                    Button { text: "Fetch"; clicked => { root.browse-run-bulk-fetch(); } }
+                                    Button { text: "Fetch"; enabled: !root.progress-visible; clicked => { root.browse-run-bulk-fetch(); } }
                                     Rectangle { }
                                 }
                                 // Date preset shortcuts
@@ -468,7 +489,7 @@ export component AppWindow inherits Window {
                                                 spacing: 2px;
                                                 alignment: center;
                                                 TextBtn { label: "Open"; clicked => { root.browse-open-url(article.url); } }
-                                                TextBtn { label: article.saved ? "Resave" : "Save"; clicked => { root.browse-save-single(article.url); } }
+                                                TextBtn { label: article.saved ? "Resave" : "Save"; enabled: !root.progress-visible; clicked => { root.browse-save-single(article.url); } }
                                             }
                                         }
                                     }
@@ -574,7 +595,7 @@ export component AppWindow inherits Window {
                                 Button { text: "Select visible"; clicked => { root.library-select-visible-for-upload(); } }
                                 Button { text: "Clear"; clicked => { root.library-clear-upload-selection(); } }
                                 Button { text: "Delete Selected"; clicked => { root.library-delete-selected(); } }
-                                Button { text: "Upload"; clicked => { root.library-upload-selected(); } }
+                                Button { text: "Upload"; enabled: !root.progress-visible; clicked => { root.library-upload-selected(); } }
                                 Rectangle { }
                                 Button { text: "Settings"; clicked => { root.lingq-open-settings(); } min-width: 60px; }
                             }

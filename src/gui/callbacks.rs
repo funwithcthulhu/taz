@@ -43,6 +43,20 @@ pub(super) fn wire_callbacks(window: &AppWindow, state: &Rc<RefCell<AppState>>) 
     });
 
     let state_clone = state.clone();
+    window.on_browse_set_date_from(move |value| {
+        let mut app = state_clone.borrow_mut();
+        app.browse.date_from = value.to_string();
+        app.save_settings();
+    });
+
+    let state_clone = state.clone();
+    window.on_browse_set_date_to(move |value| {
+        let mut app = state_clone.borrow_mut();
+        app.browse.date_to = value.to_string();
+        app.save_settings();
+    });
+
+    let state_clone = state.clone();
     window.on_browse_toggle_article(move |index| {
         let mut app = state_clone.borrow_mut();
         if let Some(url) = app.browse.articles.get(index as usize).map(|article| article.url.clone()) {
@@ -372,8 +386,13 @@ pub(super) fn wire_callbacks(window: &AppWindow, state: &Rc<RefCell<AppState>>) 
     // Cancel running background operation
     let state_clone = state.clone();
     window.on_cancel_operation(move || {
-        let app = state_clone.borrow();
-        app.cancel_flag.store(true, Ordering::Relaxed);
+        let mut app = state_clone.borrow_mut();
+        if app.cancel_active_job() {
+            app.set_status("Cancelled current background job.");
+            app.cancel_flag.store(false, Ordering::Relaxed);
+        } else {
+            app.set_status("No cancellable background job is running.");
+        }
     });
 
     // Keyboard navigation: move selection up in library list

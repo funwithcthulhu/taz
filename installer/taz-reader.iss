@@ -9,7 +9,7 @@
 ; Output: installer\output\taz-reader-setup.exe
 
 #define MyAppName "taz Reader"
-#define MyAppVersion "1.1.2"
+#define MyAppVersion "1.1.4"
 #define MyAppPublisher "Tom Boeding"
 #define MyAppExeName "taz_lingq_tool.exe"
 
@@ -43,6 +43,10 @@ Name: "startmenu"; Description: "Create a Start Menu shortcut"; GroupDescription
 
 [Files]
 Source: "..\target\release\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+
+[InstallDelete]
+Type: files; Name: "{userprograms}\taz_lingq_tool.lnk"
+Type: files; Name: "{autodesktop}\taz_lingq_tool.lnk"
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\{#MyAppExeName}"; Tasks: startmenu

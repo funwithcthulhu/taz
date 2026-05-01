@@ -1,5 +1,42 @@
 use super::*;
 
+async fn wait_for_cancel(cancel: Arc<AtomicBool>) {
+    while !cancel.load(Ordering::Relaxed) {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+async fn cancelable_sleep(cancel: Arc<AtomicBool>, duration: tokio::time::Duration) -> bool {
+    tokio::select! {
+        _ = wait_for_cancel(cancel) => true,
+        _ = tokio::time::sleep(duration) => false,
+    }
+}
+
+const ARTICLE_FETCH_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(20);
+const SECTION_DISCOVERY_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(35);
+
+fn search_date_label(date_from: Option<NaiveDate>, date_to: Option<NaiveDate>) -> String {
+    match (date_from, date_to) {
+        (Some(from), Some(to)) => format!(" from {from} to {to}"),
+        (Some(from), None) => format!(" from {from}"),
+        (None, Some(to)) => format!(" through {to}"),
+        (None, None) => String::new(),
+    }
+}
+
+fn compact_url_label(url: &str) -> String {
+    let without_scheme = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url);
+    if without_scheme.len() > 54 {
+        format!("{}...", &without_scheme[..54])
+    } else {
+        without_scheme.to_owned()
+    }
+}
+
 impl AppState {
     pub(super) fn load_browse(&mut self) {
         self.save_settings();
@@ -28,13 +65,78 @@ impl AppState {
             self.set_status("Enter a search term first.");
             return;
         }
-        self.set_status(format!("Searching taz.de for \"{query}\"..."));
+        let date_from = match parse_date_input(&self.browse.date_from) {
+            Ok(date) => date,
+            Err(err) => {
+                self.set_status(err);
+                return;
+            }
+        };
+        let date_to = match parse_date_input(&self.browse.date_to) {
+            Ok(date) => date,
+            Err(err) => {
+                self.set_status(err);
+                return;
+            }
+        };
+        if let (Some(from), Some(to)) = (date_from, date_to) {
+            if from > to {
+                self.set_status("From date must be on or before To date.");
+                return;
+            }
+        }
+
+        let date_label = search_date_label(date_from, date_to);
+        self.set_status(format!("Searching taz.de for \"{query}\"{date_label}..."));
         let scraper = self.scraper.clone();
         self.spawn_background(async move {
-            let result = scraper
-                .search_articles(&query, 5)
-                .await
-                .map_err(|err| format!("{err:#}"));
+            let result = async {
+                let articles = scraper
+                    .search_articles(&query, 5)
+                    .await
+                    .map_err(|err| format!("{err:#}"))?;
+
+                if date_from.is_none() && date_to.is_none() {
+                    return Ok(articles);
+                }
+
+                let mut filtered = Vec::new();
+                for article in articles {
+                    let metadata = tokio::time::timeout(
+                        ARTICLE_FETCH_TIMEOUT,
+                        scraper.fetch_article_metadata(&article.url),
+                    )
+                    .await
+                    .map_err(|_| {
+                        format!(
+                            "{}: metadata lookup timed out after {}s",
+                            article.title,
+                            ARTICLE_FETCH_TIMEOUT.as_secs()
+                        )
+                    });
+
+                    let Ok(Ok(metadata)) = metadata else {
+                        continue;
+                    };
+                    let Some(article_date) = parse_article_date(&metadata.date) else {
+                        continue;
+                    };
+                    if date_from.is_some_and(|from| article_date < from) {
+                        continue;
+                    }
+                    if date_to.is_some_and(|to| article_date > to) {
+                        continue;
+                    }
+
+                    let mut article = article;
+                    article.section = metadata.section;
+                    filtered.push(article);
+                    tokio::time::sleep(REQUEST_THROTTLE).await;
+                }
+
+                Ok(filtered)
+            }
+            .await;
             AppEvent::SearchLoaded(result)
         });
     }
@@ -155,6 +257,10 @@ impl AppState {
     }
 
     pub(super) fn save_browse_selection(&mut self) {
+        if self.background_job_active() {
+            self.set_status("Another save, fetch, or upload job is already running. Wait for it to finish or cancel it first.");
+            return;
+        }
         if self.browse.selected.is_empty() {
             self.set_status("Select at least one article first.");
             return;
@@ -164,6 +270,10 @@ impl AppState {
     }
 
     pub(super) fn save_single_browse(&mut self, url: String) {
+        if self.background_job_active() {
+            self.set_status("Another save, fetch, or upload job is already running. Wait for it to finish or cancel it first.");
+            return;
+        }
         self.run_fetch_job(vec![url], "Saving article");
     }
 
@@ -181,7 +291,7 @@ impl AppState {
         let scraper = self.scraper.clone();
         let db = self.db.clone();
         let cancel = self.cancel_flag.clone();
-        self.runtime.spawn(async move {
+        let handle = self.runtime.spawn(async move {
             let result: Result<(usize, Vec<String>), String> = async {
                 let mut saved = 0usize;
                 let mut failed = Vec::new();
@@ -196,9 +306,25 @@ impl AppState {
                         break;
                     }
                     if index > 0 {
-                        tokio::time::sleep(REQUEST_THROTTLE).await;
+                        if cancelable_sleep(cancel.clone(), REQUEST_THROTTLE).await {
+                            break;
+                        }
                     }
-                    match scraper.fetch_article(&url).await {
+                    let _ = tx.send(AppEvent::SaveProgress(FetchProgress {
+                        label: format!("Saving {}", compact_url_label(&url)),
+                        completed: index,
+                        total,
+                    }));
+                    let fetch_result = tokio::select! {
+                        _ = wait_for_cancel(cancel.clone()) => break,
+                        result = tokio::time::timeout(ARTICLE_FETCH_TIMEOUT, scraper.fetch_article(&url)) => {
+                            match result {
+                                Ok(result) => result,
+                                Err(_) => Err(anyhow::anyhow!("fetch timed out after {}s", ARTICLE_FETCH_TIMEOUT.as_secs())),
+                            }
+                        },
+                    };
+                    match fetch_result {
                         Ok(article) => match db.save_article(&article) {
                             Ok(_) => saved += 1,
                             Err(err) => failed.push(format!("{}: {}", article.title, err)),
@@ -232,9 +358,14 @@ impl AppState {
             };
             let _ = tx.send(event);
         });
+        self.set_current_job(handle);
     }
 
     pub(super) fn run_bulk_fetch(&mut self) {
+        if self.background_job_active() {
+            self.set_status("Another save, fetch, or upload job is already running. Wait for it to finish or cancel it first.");
+            return;
+        }
         if self.bulk.selected_sections.is_empty() {
             self.set_status("Select at least one section for bulk fetch.");
             return;
@@ -303,7 +434,7 @@ impl AppState {
         let scraper = self.scraper.clone();
         let db = self.db.clone();
         let cancel = self.cancel_flag.clone();
-        self.runtime.spawn(async move {
+        let handle = self.runtime.spawn(async move {
             let result: Result<(usize, usize, usize, Vec<String>, bool), String> = async {
                 let discovery_limit = per_section_cap.saturating_mul(4).max(160);
                 let mut seen = HashSet::new();
@@ -335,10 +466,25 @@ impl AppState {
                         total: max_articles,
                     }));
 
-                    let summaries = scraper
-                        .browse_section(section, discovery_limit)
-                        .await
-                        .map_err(|err| format!("{err:#}"))?;
+                    let summaries = tokio::select! {
+                        _ = wait_for_cancel(cancel.clone()) => break,
+                        result = tokio::time::timeout(
+                            SECTION_DISCOVERY_TIMEOUT,
+                            scraper.browse_section(section, discovery_limit),
+                        ) => {
+                            match result {
+                                Ok(result) => result.map_err(|err| format!("{err:#}"))?,
+                                Err(_) => {
+                                    failed.push(format!(
+                                        "{}: source discovery timed out after {}s",
+                                        section.label,
+                                        SECTION_DISCOVERY_TIMEOUT.as_secs()
+                                    ));
+                                    continue;
+                                }
+                            }
+                        }
+                    };
 
                     for summary in summaries {
                         if saved >= max_articles || accepted_for_section >= per_section_cap {
@@ -355,9 +501,20 @@ impl AppState {
                         if cancel.load(Ordering::Relaxed) {
                             break;
                         }
-                        tokio::time::sleep(REQUEST_THROTTLE).await;
+                        if cancelable_sleep(cancel.clone(), REQUEST_THROTTLE).await {
+                            break;
+                        }
 
-                        match scraper.fetch_article(&summary.url).await {
+                        let fetch_result = tokio::select! {
+                            _ = wait_for_cancel(cancel.clone()) => break,
+                            result = tokio::time::timeout(ARTICLE_FETCH_TIMEOUT, scraper.fetch_article(&summary.url)) => {
+                                match result {
+                                    Ok(result) => result,
+                                    Err(_) => Err(anyhow::anyhow!("fetch timed out after {}s", ARTICLE_FETCH_TIMEOUT.as_secs())),
+                                }
+                            },
+                        };
+                        match fetch_result {
                             Ok(article) => {
                                 let Some(article_date) = parse_article_date(&article.date) else {
                                     consecutive_old += 1;
@@ -423,6 +580,7 @@ impl AppState {
             };
             let _ = tx.send(event);
         });
+        self.set_current_job(handle);
     }
 
     /// Auto-fetch recent articles on startup.  Uses all available sections,
@@ -450,7 +608,7 @@ impl AppState {
         let db = self.db.clone();
         let cancel = self.cancel_flag.clone();
 
-        self.runtime.spawn(async move {
+        let handle = self.runtime.spawn(async move {
             let result: Result<(usize, usize, Vec<String>, bool), String> = async {
                 let discovery_limit = per_section_cap.saturating_mul(4).max(40);
                 let mut seen = std::collections::HashSet::new();
@@ -479,9 +637,23 @@ impl AppState {
                         total: max_articles,
                     }));
 
-                    let summaries = match scraper.browse_section(section, discovery_limit).await {
-                        Ok(s) => s,
-                        Err(_) => continue,
+                    let summaries = match tokio::select! {
+                        _ = wait_for_cancel(cancel.clone()) => break,
+                        result = tokio::time::timeout(
+                            SECTION_DISCOVERY_TIMEOUT,
+                            scraper.browse_section(section, discovery_limit),
+                        ) => result,
+                    } {
+                        Ok(Ok(s)) => s,
+                        Ok(Err(_)) => continue,
+                        Err(_) => {
+                            failed.push(format!(
+                                "{}: source discovery timed out after {}s",
+                                section.label,
+                                SECTION_DISCOVERY_TIMEOUT.as_secs()
+                            ));
+                            continue;
+                        }
                     };
 
                     for summary in summaries {
@@ -498,9 +670,20 @@ impl AppState {
                         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
                             break;
                         }
-                        tokio::time::sleep(REQUEST_THROTTLE).await;
+                        if cancelable_sleep(cancel.clone(), REQUEST_THROTTLE).await {
+                            break;
+                        }
 
-                        match scraper.fetch_article(&summary.url).await {
+                        let fetch_result = tokio::select! {
+                            _ = wait_for_cancel(cancel.clone()) => break,
+                            result = tokio::time::timeout(ARTICLE_FETCH_TIMEOUT, scraper.fetch_article(&summary.url)) => {
+                                match result {
+                                    Ok(result) => result,
+                                    Err(_) => Err(anyhow::anyhow!("fetch timed out after {}s", ARTICLE_FETCH_TIMEOUT.as_secs())),
+                                }
+                            },
+                        };
+                        match fetch_result {
                             Ok(article) => {
                                 let Some(article_date) = parse_article_date(&article.date) else {
                                     consecutive_old += 1;
@@ -566,6 +749,7 @@ impl AppState {
             };
             let _ = tx.send(event);
         });
+        self.set_current_job(handle);
     }
 
     pub(super) fn delete_selected(&mut self) {
@@ -614,6 +798,10 @@ impl AppState {
     }
 
     pub(super) fn upload_selected(&mut self) {
+        if self.background_job_active() {
+            self.set_status("Another save, fetch, or upload job is already running. Wait for it to finish or cancel it first.");
+            return;
+        }
         if self.lq.api_key.trim().is_empty() {
             self.set_status("Open LingQ settings and save a token first.");
             return;
@@ -652,7 +840,7 @@ impl AppState {
         let lingq = self.lingq.clone();
         let db = self.db.clone();
         let cancel = self.cancel_flag.clone();
-        self.runtime.spawn(async move {
+        let handle = self.runtime.spawn(async move {
             let result: Result<(usize, usize, Vec<String>, bool), String> = async {
                 let mut uploaded = 0usize;
                 let mut skipped_already = 0usize;
@@ -670,7 +858,9 @@ impl AppState {
                         break;
                     }
                     if index > 0 {
-                        tokio::time::sleep(REQUEST_THROTTLE).await;
+                        if cancelable_sleep(cancel.clone(), REQUEST_THROTTLE).await {
+                            break;
+                        }
                     }
                     let Some(article) = db.get_article(id).map_err(|err| format!("{err:#}"))? else {
                         failed.push(format!("article #{id} not found"));
@@ -686,10 +876,15 @@ impl AppState {
                     };
 
                     // If already on LingQ, update the existing lesson; otherwise create new
-                    let upload_result = if let Some(existing_id) = article.lingq_lesson_id {
-                        lingq.update_lesson(&request, existing_id).await
-                    } else {
-                        lingq.upload_lesson(&request).await
+                    let upload_result = tokio::select! {
+                        _ = wait_for_cancel(cancel.clone()) => break,
+                        result = async {
+                            if let Some(existing_id) = article.lingq_lesson_id {
+                                lingq.update_lesson(&request, existing_id).await
+                            } else {
+                                lingq.upload_lesson(&request).await
+                            }
+                        } => result
                     };
 
                     match upload_result {
@@ -740,6 +935,7 @@ impl AppState {
             };
             let _ = tx.send(event);
         });
+        self.set_current_job(handle);
     }
 
     pub(super) fn poll_events(&mut self) {
@@ -769,15 +965,21 @@ impl AppState {
                 AppEvent::SearchLoaded(result) => match result {
                     Ok(articles) => {
                         let count = articles.len();
+                        let date_label = search_date_label(
+                            parse_date_input(&self.browse.date_from).unwrap_or(None),
+                            parse_date_input(&self.browse.date_to).unwrap_or(None),
+                        );
                         self.browse.articles = articles;
                         self.browse.report = Some(format!(
-                            "Search results for \"{}\".",
-                            self.browse.search_query
+                            "Search results for \"{}\"{}.",
+                            self.browse.search_query,
+                            date_label
                         ));
                         self.dirty.browse = true;
                         self.set_status(format!(
-                            "Found {count} articles for \"{}\".",
-                            self.browse.search_query
+                            "Found {count} articles for \"{}\"{}.",
+                            self.browse.search_query,
+                            date_label
                         ));
                     }
                     Err(err) => {
@@ -821,6 +1023,7 @@ impl AppState {
                     self.sync_to_window();
                 }
                 AppEvent::FetchFinished { message, failed } => {
+                    self.clear_current_job();
                     self.progress = None;
                     self.cancel_flag.store(false, Ordering::Relaxed);
                     self.set_status(format!("{message}{}", format_failure_suffix(&failed)));
@@ -835,6 +1038,7 @@ impl AppState {
                     self.sync_to_window();
                 }
                 AppEvent::SaveFinished { message, failed } => {
+                    self.clear_current_job();
                     self.save_progress = None;
                     self.cancel_flag.store(false, Ordering::Relaxed);
                     self.set_status(format!("{message}{}", format_failure_suffix(&failed)));
@@ -883,6 +1087,7 @@ impl AppState {
                     }
                 },
                 AppEvent::UploadFinished { uploaded, skipped_already, failed, cancelled } => {
+                    self.clear_current_job();
                     self.progress = None;
                     self.cancel_flag.store(false, Ordering::Relaxed);
                     let prefix = if cancelled { "Cancelled. " } else { "" };
