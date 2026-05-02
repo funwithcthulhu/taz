@@ -13,7 +13,7 @@ use log::{error, info};
 use slint::{ModelRc, SharedString, Timer, TimerMode, VecModel, Weak};
 use std::{
     cell::RefCell,
-    collections::HashSet,
+    collections::{HashSet, VecDeque},
     rc::Rc,
     sync::{
         Arc,
@@ -89,6 +89,65 @@ struct FetchProgress {
     total: usize,
 }
 
+#[derive(Clone)]
+enum RetryAction {
+    SaveUrl(String),
+    UploadArticle(i64),
+}
+
+#[derive(Clone)]
+struct JobFailure {
+    label: String,
+    detail: String,
+    retry: Option<RetryAction>,
+}
+
+#[derive(Clone)]
+struct ActivityEntry {
+    kind: String,
+    message: String,
+    detail: String,
+}
+
+enum QueuedJob {
+    SaveUrls {
+        urls: Vec<String>,
+        label: String,
+    },
+    BulkFetch {
+        section_ids: Vec<String>,
+        imported_urls: HashSet<String>,
+        max_articles: usize,
+        per_section_cap: usize,
+        stop_after_old: usize,
+        date_from: NaiveDate,
+        date_to: NaiveDate,
+    },
+    UploadArticles {
+        ids: Vec<i64>,
+        api_key: String,
+        language: String,
+        collection_id: Option<i64>,
+    },
+}
+
+impl QueuedJob {
+    fn label(&self) -> String {
+        match self {
+            Self::SaveUrls { urls, label } => format!("{label} ({})", urls.len()),
+            Self::BulkFetch {
+                section_ids,
+                max_articles,
+                ..
+            } => format!(
+                "Bulk fetch from {} section(s), max {max_articles}",
+                section_ids.len()
+            ),
+            Self::UploadArticles { ids, .. } => format!("Upload {} article(s)", ids.len()),
+        }
+    }
+}
+
 enum AppEvent {
     BrowseLoaded(Result<BrowseSectionResult, String>),
     SearchLoaded(Result<Vec<ArticleSummary>, String>),
@@ -98,19 +157,19 @@ enum AppEvent {
     FetchProgress(FetchProgress),
     FetchFinished {
         message: String,
-        failed: Vec<String>,
+        failed: Vec<JobFailure>,
     },
     SaveProgress(FetchProgress),
     SaveFinished {
         message: String,
-        failed: Vec<String>,
+        failed: Vec<JobFailure>,
     },
     CollectionsLoaded(Result<Vec<Collection>, String>),
     LingqLoggedIn(Result<String, String>),
     UploadFinished {
         uploaded: usize,
         skipped_already: usize,
-        failed: Vec<String>,
+        failed: Vec<JobFailure>,
         cancelled: bool,
     },
 }
@@ -124,6 +183,7 @@ struct DirtyFlags {
     collections: bool,
     preview: bool,
     progress: bool,
+    activity: bool,
 }
 
 impl DirtyFlags {
@@ -135,6 +195,7 @@ impl DirtyFlags {
             collections: true,
             preview: true,
             progress: true,
+            activity: true,
         }
     }
 
@@ -230,6 +291,10 @@ struct AppState {
     progress: Option<FetchProgress>,
     save_progress: Option<FetchProgress>,
     current_job: Option<JoinHandle<()>>,
+    current_job_started_at: Option<std::time::Instant>,
+    job_queue: VecDeque<QueuedJob>,
+    failed_items: Vec<JobFailure>,
+    activity: VecDeque<ActivityEntry>,
     cancel_flag: Arc<AtomicBool>,
     /// Signals all background tasks to stop when the app is shutting down.
     shutdown_flag: Arc<AtomicBool>,
@@ -250,11 +315,13 @@ impl AppState {
     }
 
     fn set_current_job(&mut self, handle: JoinHandle<()>) {
+        self.current_job_started_at = Some(std::time::Instant::now());
         self.current_job = Some(handle);
     }
 
     fn clear_current_job(&mut self) {
         self.current_job = None;
+        self.current_job_started_at = None;
     }
 
     fn cancel_active_job(&mut self) -> bool {
@@ -267,6 +334,16 @@ impl AppState {
         };
         self.progress = None;
         self.save_progress = None;
+        self.current_job_started_at = None;
+        let cleared = self.job_queue.len();
+        self.job_queue.clear();
+        if cleared > 0 {
+            self.add_activity(
+                "cancelled",
+                "Cleared queued work",
+                format!("{cleared} queued job(s) removed."),
+            );
+        }
         self.dirty.progress = true;
         aborted
     }
@@ -325,6 +402,45 @@ impl AppState {
         self.status_message = message.into();
         self.sync_to_window();
     }
+
+    fn add_activity(
+        &mut self,
+        kind: impl Into<String>,
+        message: impl Into<String>,
+        detail: impl Into<String>,
+    ) {
+        self.activity.push_front(ActivityEntry {
+            kind: kind.into(),
+            message: message.into(),
+            detail: detail.into(),
+        });
+        while self.activity.len() > 30 {
+            self.activity.pop_back();
+        }
+        self.dirty.activity = true;
+    }
+
+    fn record_failures(&mut self, failures: &[JobFailure]) {
+        if failures.is_empty() {
+            return;
+        }
+        for failure in failures {
+            self.failed_items.push(failure.clone());
+        }
+        if self.failed_items.len() > 100 {
+            let remove_count = self.failed_items.len() - 100;
+            self.failed_items.drain(0..remove_count);
+        }
+        self.add_activity(
+            "failed",
+            format!("{} failed item(s)", failures.len()),
+            failures
+                .first()
+                .map(|failure| failure.label.clone())
+                .unwrap_or_default(),
+        );
+        self.dirty.activity = true;
+    }
 }
 
 // ── Entry point ──
@@ -341,6 +457,8 @@ pub fn run() -> Result<(), slint::PlatformError> {
     window.set_library_rows(ModelRc::from(Rc::new(VecModel::from(Vec::<LibraryRow>::new()))));
     window.set_browse_rows(ModelRc::from(Rc::new(VecModel::from(Vec::<BrowseRow>::new()))));
     window.set_stat_cards(ModelRc::from(Rc::new(VecModel::from(Vec::<StatCard>::new()))));
+    window.set_activity_rows(ModelRc::from(Rc::new(VecModel::from(Vec::<ActivityRow>::new()))));
+    window.set_failed_rows(ModelRc::from(Rc::new(VecModel::from(Vec::<FailedRow>::new()))));
     window.set_heading_labels(ModelRc::from(Rc::new(VecModel::from(Vec::<SharedString>::new()))));
     window.set_section_labels(ModelRc::from(Rc::new(VecModel::from(Vec::<SharedString>::new()))));
     window.set_sort_labels(ModelRc::from(Rc::new(VecModel::from(Vec::<SharedString>::new()))));
@@ -396,6 +514,10 @@ pub fn run() -> Result<(), slint::PlatformError> {
         progress: None,
         save_progress: None,
         current_job: None,
+        current_job_started_at: None,
+        job_queue: VecDeque::new(),
+        failed_items: Vec::new(),
+        activity: VecDeque::new(),
         cancel_flag: Arc::new(AtomicBool::new(false)),
         shutdown_flag: Arc::new(AtomicBool::new(false)),
         settings_dirty: false,
@@ -502,11 +624,22 @@ pub fn run() -> Result<(), slint::PlatformError> {
 
 // ── Free helper functions ──
 
-fn format_failure_suffix(failed: &[String]) -> String {
+fn format_failure_suffix(failed: &[JobFailure]) -> String {
     if failed.is_empty() {
         return String::new();
     }
-    let details = failed.iter().take(3).cloned().collect::<Vec<_>>().join("; ");
+    let details = failed
+        .iter()
+        .take(3)
+        .map(|failure| {
+            if failure.detail.is_empty() {
+                failure.label.clone()
+            } else {
+                format!("{}: {}", failure.label, failure.detail)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
     let more = if failed.len() > 3 {
         format!(" (+{} more)", failed.len() - 3)
     } else {
@@ -703,14 +836,24 @@ mod tests {
 
     #[test]
     fn format_failure_suffix_one() {
-        let result = format_failure_suffix(&["error1".to_owned()]);
+        let result = format_failure_suffix(&[JobFailure {
+            label: "error1".to_owned(),
+            detail: String::new(),
+            retry: None,
+        }]);
         assert!(result.contains("1 failed"));
         assert!(result.contains("error1"));
     }
 
     #[test]
     fn format_failure_suffix_truncates_at_three() {
-        let failures: Vec<String> = (1..=5).map(|i| format!("err{i}")).collect();
+        let failures: Vec<JobFailure> = (1..=5)
+            .map(|i| JobFailure {
+                label: format!("err{i}"),
+                detail: String::new(),
+                retry: None,
+            })
+            .collect();
         let result = format_failure_suffix(&failures);
         assert!(result.contains("5 failed"));
         assert!(result.contains("+2 more"));

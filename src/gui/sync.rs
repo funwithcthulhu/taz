@@ -217,6 +217,11 @@ impl AppState {
         window.set_status_message(self.status_message.clone().into());
         window.set_preview_wide(self.library.preview_wide);
         window.set_taz_search_query(self.browse.search_query.clone().into());
+        window.set_queue_label(if self.job_queue.is_empty() {
+            SharedString::new()
+        } else {
+            SharedString::from(format!("{} queued job(s)", self.job_queue.len()))
+        });
 
         // ── Browse models (only rebuilt when browse data changes) ──
         if self.dirty.browse {
@@ -466,11 +471,45 @@ impl AppState {
             .unwrap_or(0.0);
         window.set_progress_label(
             active_progress
-                .map(|p| format!("{} ({} / {})", p.label, p.completed, p.total))
+                .map(|p| {
+                    let elapsed = self
+                        .current_job_started_at
+                        .map(|started| started.elapsed().as_secs())
+                        .unwrap_or(0);
+                    format!(
+                        "{} ({} / {}, {}s)",
+                        p.label, p.completed, p.total, elapsed
+                    )
+                })
                 .unwrap_or_default()
                 .into(),
         );
         window.set_progress_value(progress_value);
+
+        if self.dirty.activity {
+            let activity_rows = self
+                .activity
+                .iter()
+                .map(|entry| ActivityRow {
+                    kind: entry.kind.clone().into(),
+                    message: entry.message.clone().into(),
+                    detail: entry.detail.clone().into(),
+                })
+                .collect::<Vec<_>>();
+            window.set_activity_rows(ModelRc::from(Rc::new(VecModel::from(activity_rows))));
+
+            let failed_rows = self
+                .failed_items
+                .iter()
+                .rev()
+                .map(|failure| FailedRow {
+                    label: failure.label.clone().into(),
+                    detail: failure.detail.clone().into(),
+                    retryable: failure.retry.is_some(),
+                })
+                .collect::<Vec<_>>();
+            window.set_failed_rows(ModelRc::from(Rc::new(VecModel::from(failed_rows))));
+        }
 
         // Clear all dirty flags after sync
         self.dirty.clear();

@@ -1179,7 +1179,7 @@ static RE_DATE_JSON_LD: LazyLock<Regex> =
 static RE_DATE_TEXT: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\b(\d{1,2}\.\d{1,2}\.\d{4})\b").expect("text date regex"));
 static RE_DATE_URL: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"/(\d{4})/(\d{2})/(\d{2})/").expect("url date regex"));
+    LazyLock::new(|| Regex::new(r"/!?(\d{4})/(\d{2})/(\d{2})/").expect("url date regex"));
 
 fn extract_date_from_json_ld(html: &str) -> Option<String> {
     RE_DATE_JSON_LD

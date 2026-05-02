@@ -4,6 +4,8 @@ export struct BrowseRow { title: string, teaser: string, section: string, source
 export struct BulkSectionRow { label: string, selected: bool }
 export struct LibraryRow { id: int, title: string, section: string, heading: string, date: string, words: string, difficulty: int, url: string, uploaded: bool, paywalled: bool, selected: bool, confirming-delete: bool, viewing: bool }
 export struct StatCard { label: string, value: string }
+export struct ActivityRow { kind: string, message: string, detail: string }
+export struct FailedRow { label: string, detail: string, retryable: bool }
 
 component Panel inherits Rectangle {
     in property <brush> panel-background: #151c28;
@@ -100,6 +102,9 @@ export component AppWindow inherits Window {
     in property <string> progress-label: "";
     in property <float> progress-value: 0;
     in property <bool> progress-visible: false;
+    in property <string> queue-label: "";
+    in property <[ActivityRow]> activity-rows;
+    in property <[FailedRow]> failed-rows;
     in property <string> browse-count: "";
     in property <string> library-count: "";
     in-out property <bool> auto-fetch-on-startup: false;
@@ -148,6 +153,8 @@ export component AppWindow inherits Window {
     callback taz-set-search-query(string);
     callback taz-search();
     callback cancel-operation();
+    callback retry-failed-items();
+    callback clear-failed-items();
     callback library-key-up();
     callback library-key-down();
     callback library-key-space();
@@ -238,11 +245,12 @@ export component AppWindow inherits Window {
                     }
 
                     if root.progress-visible : Panel {
-                        height: 76px;
+                        height: root.queue-label == "" ? 76px : 92px;
                         VerticalLayout {
                             padding: 10px;
                             spacing: 6px;
                             Text { text: root.progress-label; color: #eef4ff; font-size: 11px; wrap: word-wrap; overflow: elide; }
+                            if root.queue-label != "" : Text { text: root.queue-label; color: #8fa0bd; font-size: 10px; overflow: elide; }
                             Rectangle {
                                 height: 6px;
                                 border-radius: 999px;
@@ -272,8 +280,37 @@ export component AppWindow inherits Window {
                         }
                     }
 
+                    if root.failed-rows.length > 0 : Panel {
+                        height: 116px;
+                        VerticalLayout {
+                            padding: 10px;
+                            spacing: 5px;
+                            HorizontalLayout {
+                                Text { text: "Retry list"; color: #ffb3be; font-size: 12px; font-weight: 800; horizontal-stretch: 1; }
+                                Text { text: root.failed-rows.length; color: #ffb3be; font-size: 12px; font-weight: 800; }
+                            }
+                            ScrollView {
+                                height: 42px;
+                                VerticalLayout {
+                                    spacing: 2px;
+                                    for failed in root.failed-rows : Text {
+                                        text: failed.label;
+                                        color: failed.retryable ? #eef4ff : #8b95aa;
+                                        font-size: 10px;
+                                        overflow: elide;
+                                    }
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 5px;
+                                Button { text: "Retry"; clicked => { root.retry-failed-items(); } }
+                                Button { text: "Clear"; clicked => { root.clear-failed-items(); } }
+                            }
+                        }
+                    }
+
                     Panel {
-                        vertical-stretch: 1;
+                        height: 118px;
                         VerticalLayout {
                             padding: 10px;
                             spacing: 4px;
@@ -281,6 +318,27 @@ export component AppWindow inherits Window {
                                 spacing: 6px;
                                 Text { text: stat.label + ":"; color: #7f8ca7; font-size: 12px; font-weight: 700; width: 105px; horizontal-alignment: left; }
                                 Text { text: stat.value; color: white; font-size: 12px; font-weight: 800; horizontal-alignment: right; horizontal-stretch: 1; }
+                            }
+                        }
+                    }
+
+                    Panel {
+                        vertical-stretch: 1;
+                        VerticalLayout {
+                            padding: 10px;
+                            spacing: 5px;
+                            Text { text: "Activity"; color: #8190ab; font-size: 12px; font-weight: 800; }
+                            ScrollView {
+                                vertical-stretch: 1;
+                                VerticalLayout {
+                                    spacing: 5px;
+                                    if root.activity-rows.length == 0 : Text { text: "No recent activity."; color: #66738b; font-size: 10px; }
+                                    for item in root.activity-rows : VerticalLayout {
+                                        spacing: 1px;
+                                        Text { text: item.message; color: #eef4ff; font-size: 10px; font-weight: 700; overflow: elide; }
+                                        Text { text: item.detail; color: #7d8aa4; font-size: 9px; overflow: elide; }
+                                    }
+                                }
                             }
                         }
                     }

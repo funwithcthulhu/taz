@@ -257,27 +257,77 @@ impl AppState {
     }
 
     pub(super) fn save_browse_selection(&mut self) {
-        if self.background_job_active() {
-            self.set_status("Another save, fetch, or upload job is already running. Wait for it to finish or cancel it first.");
-            return;
-        }
         if self.browse.selected.is_empty() {
             self.set_status("Select at least one article first.");
             return;
         }
         let urls = self.browse.selected.iter().cloned().collect::<Vec<_>>();
-        self.run_fetch_job(urls, "Saving selected articles");
+        self.enqueue_job(QueuedJob::SaveUrls {
+            urls,
+            label: "Saving selected articles".to_owned(),
+        });
     }
 
     pub(super) fn save_single_browse(&mut self, url: String) {
-        if self.background_job_active() {
-            self.set_status("Another save, fetch, or upload job is already running. Wait for it to finish or cancel it first.");
-            return;
-        }
-        self.run_fetch_job(vec![url], "Saving article");
+        self.enqueue_job(QueuedJob::SaveUrls {
+            urls: vec![url],
+            label: "Saving article".to_owned(),
+        });
     }
 
-    fn run_fetch_job(&mut self, urls: Vec<String>, label: &str) {
+    fn enqueue_job(&mut self, job: QueuedJob) {
+        let label = job.label();
+        self.job_queue.push_back(job);
+        let queue_len = self.job_queue.len();
+        self.add_activity("queued", &label, format!("{queue_len} job(s) waiting."));
+        self.dirty.progress = true;
+        if self.background_job_active() {
+            self.set_status(format!("Queued: {label}"));
+            return;
+        }
+        self.start_next_job_if_idle();
+    }
+
+    fn start_next_job_if_idle(&mut self) {
+        if self.background_job_active() {
+            return;
+        }
+        let Some(job) = self.job_queue.pop_front() else {
+            self.dirty.progress = true;
+            self.sync_to_window();
+            return;
+        };
+        let label = job.label();
+        self.add_activity("started", &label, "Background job started.");
+        match job {
+            QueuedJob::SaveUrls { urls, label } => self.start_save_job(urls, &label),
+            QueuedJob::BulkFetch {
+                section_ids,
+                imported_urls,
+                max_articles,
+                per_section_cap,
+                stop_after_old,
+                date_from,
+                date_to,
+            } => self.start_bulk_fetch_job(
+                section_ids,
+                imported_urls,
+                max_articles,
+                per_section_cap,
+                stop_after_old,
+                date_from,
+                date_to,
+            ),
+            QueuedJob::UploadArticles {
+                ids,
+                api_key,
+                language,
+                collection_id,
+            } => self.start_upload_job(ids, api_key, language, collection_id),
+        }
+    }
+
+    fn start_save_job(&mut self, urls: Vec<String>, label: &str) {
         let total = urls.len();
         self.cancel_flag.store(false, Ordering::Relaxed);
         self.save_progress = Some(FetchProgress {
@@ -292,7 +342,7 @@ impl AppState {
         let db = self.db.clone();
         let cancel = self.cancel_flag.clone();
         let handle = self.runtime.spawn(async move {
-            let result: Result<(usize, Vec<String>), String> = async {
+            let result: Result<(usize, Vec<JobFailure>), String> = async {
                 let mut saved = 0usize;
                 let mut failed = Vec::new();
                 // Overall time cap: 10 minutes for the entire batch
@@ -300,7 +350,11 @@ impl AppState {
                 for (index, url) in urls.into_iter().enumerate() {
                     if cancel.load(Ordering::Relaxed) || tokio::time::Instant::now() > deadline {
                         if tokio::time::Instant::now() > deadline {
-                            failed.push("Operation timed out (10 min limit).".to_owned());
+                            failed.push(JobFailure {
+                                label: "Save batch".to_owned(),
+                                detail: "Operation timed out (10 min limit).".to_owned(),
+                                retry: None,
+                            });
                             cancel.store(true, Ordering::Relaxed);
                         }
                         break;
@@ -315,21 +369,51 @@ impl AppState {
                         completed: index,
                         total,
                     }));
-                    let fetch_result = tokio::select! {
-                        _ = wait_for_cancel(cancel.clone()) => break,
-                        result = tokio::time::timeout(ARTICLE_FETCH_TIMEOUT, scraper.fetch_article(&url)) => {
-                            match result {
-                                Ok(result) => result,
-                                Err(_) => Err(anyhow::anyhow!("fetch timed out after {}s", ARTICLE_FETCH_TIMEOUT.as_secs())),
-                            }
-                        },
-                    };
+                    let mut fetch_result = Err(anyhow::anyhow!("not attempted"));
+                    for attempt in 1..=2 {
+                        let attempt_label = if attempt == 1 {
+                            format!("Saving {}", compact_url_label(&url))
+                        } else {
+                            format!("Retry {attempt}/2: {}", compact_url_label(&url))
+                        };
+                        let _ = tx.send(AppEvent::SaveProgress(FetchProgress {
+                            label: attempt_label,
+                            completed: index,
+                            total,
+                        }));
+                        fetch_result = tokio::select! {
+                            _ = wait_for_cancel(cancel.clone()) => break,
+                            result = tokio::time::timeout(ARTICLE_FETCH_TIMEOUT, scraper.fetch_article(&url)) => {
+                                match result {
+                                    Ok(result) => result,
+                                    Err(_) => Err(anyhow::anyhow!("fetch timed out after {}s", ARTICLE_FETCH_TIMEOUT.as_secs())),
+                                }
+                            },
+                        };
+                        if fetch_result.is_ok() || attempt == 2 {
+                            break;
+                        }
+                        if cancelable_sleep(cancel.clone(), tokio::time::Duration::from_millis(700)).await {
+                            break;
+                        }
+                    }
+                    if cancel.load(Ordering::Relaxed) {
+                        break;
+                    }
                     match fetch_result {
                         Ok(article) => match db.save_article(&article) {
                             Ok(_) => saved += 1,
-                            Err(err) => failed.push(format!("{}: {}", article.title, err)),
+                            Err(err) => failed.push(JobFailure {
+                                label: article.title,
+                                detail: err.to_string(),
+                                retry: Some(RetryAction::SaveUrl(url.clone())),
+                            }),
                         },
-                        Err(err) => failed.push(format!("{url}: {err}")),
+                        Err(err) => failed.push(JobFailure {
+                            label: compact_url_label(&url),
+                            detail: err.to_string(),
+                            retry: Some(RetryAction::SaveUrl(url.clone())),
+                        }),
                     }
                     let _ = tx.send(AppEvent::SaveProgress(FetchProgress {
                         label: label.clone(),
@@ -362,10 +446,6 @@ impl AppState {
     }
 
     pub(super) fn run_bulk_fetch(&mut self) {
-        if self.background_job_active() {
-            self.set_status("Another save, fetch, or upload job is already running. Wait for it to finish or cancel it first.");
-            return;
-        }
         if self.bulk.selected_sections.is_empty() {
             self.set_status("Select at least one section for bulk fetch.");
             return;
@@ -423,6 +503,27 @@ impl AppState {
 
         let section_ids = self.bulk.selected_sections.iter().cloned().collect::<Vec<_>>();
         let imported_urls = self.browse.saved_urls.clone();
+        self.enqueue_job(QueuedJob::BulkFetch {
+            section_ids,
+            imported_urls,
+            max_articles,
+            per_section_cap,
+            stop_after_old,
+            date_from,
+            date_to,
+        });
+    }
+
+    fn start_bulk_fetch_job(
+        &mut self,
+        section_ids: Vec<String>,
+        imported_urls: HashSet<String>,
+        max_articles: usize,
+        per_section_cap: usize,
+        stop_after_old: usize,
+        date_from: NaiveDate,
+        date_to: NaiveDate,
+    ) {
         self.cancel_flag.store(false, Ordering::Relaxed);
         self.progress = Some(FetchProgress {
             label: "Fetching selected sections".to_owned(),
@@ -435,7 +536,7 @@ impl AppState {
         let db = self.db.clone();
         let cancel = self.cancel_flag.clone();
         let handle = self.runtime.spawn(async move {
-            let result: Result<(usize, usize, usize, Vec<String>, bool), String> = async {
+            let result: Result<(usize, usize, usize, Vec<JobFailure>, bool), String> = async {
                 let discovery_limit = per_section_cap.saturating_mul(4).max(160);
                 let mut seen = HashSet::new();
                 let mut saved = 0usize;
@@ -475,11 +576,14 @@ impl AppState {
                             match result {
                                 Ok(result) => result.map_err(|err| format!("{err:#}"))?,
                                 Err(_) => {
-                                    failed.push(format!(
-                                        "{}: source discovery timed out after {}s",
-                                        section.label,
-                                        SECTION_DISCOVERY_TIMEOUT.as_secs()
-                                    ));
+                                    failed.push(JobFailure {
+                                        label: section.label.to_owned(),
+                                        detail: format!(
+                                            "source discovery timed out after {}s",
+                                            SECTION_DISCOVERY_TIMEOUT.as_secs()
+                                        ),
+                                        retry: None,
+                                    });
                                     continue;
                                 }
                             }
@@ -545,11 +649,19 @@ impl AppState {
                                         }));
                                     }
                                     Err(err) => {
-                                        failed.push(format!("{}: {}", article.title, err));
+                                        failed.push(JobFailure {
+                                            label: article.title,
+                                            detail: err.to_string(),
+                                            retry: Some(RetryAction::SaveUrl(summary.url.clone())),
+                                        });
                                     }
                                 }
                             }
-                            Err(err) => failed.push(format!("{}: {}", summary.title, err)),
+                            Err(err) => failed.push(JobFailure {
+                                label: summary.title,
+                                detail: err.to_string(),
+                                retry: Some(RetryAction::SaveUrl(summary.url.clone())),
+                            }),
                         }
                     }
 
@@ -609,7 +721,7 @@ impl AppState {
         let cancel = self.cancel_flag.clone();
 
         let handle = self.runtime.spawn(async move {
-            let result: Result<(usize, usize, Vec<String>, bool), String> = async {
+            let result: Result<(usize, usize, Vec<JobFailure>, bool), String> = async {
                 let discovery_limit = per_section_cap.saturating_mul(4).max(40);
                 let mut seen = std::collections::HashSet::new();
                 let mut saved = 0usize;
@@ -647,11 +759,14 @@ impl AppState {
                         Ok(Ok(s)) => s,
                         Ok(Err(_)) => continue,
                         Err(_) => {
-                            failed.push(format!(
-                                "{}: source discovery timed out after {}s",
-                                section.label,
-                                SECTION_DISCOVERY_TIMEOUT.as_secs()
-                            ));
+                            failed.push(JobFailure {
+                                label: section.label.to_owned(),
+                                detail: format!(
+                                    "source discovery timed out after {}s",
+                                    SECTION_DISCOVERY_TIMEOUT.as_secs()
+                                ),
+                                retry: None,
+                            });
                             continue;
                         }
                     };
@@ -712,11 +827,19 @@ impl AppState {
                                         }));
                                     }
                                     Err(err) => {
-                                        failed.push(format!("{}: {}", article.title, err));
+                                        failed.push(JobFailure {
+                                            label: article.title,
+                                            detail: err.to_string(),
+                                            retry: Some(RetryAction::SaveUrl(summary.url.clone())),
+                                        });
                                     }
                                 }
                             }
-                            Err(err) => failed.push(format!("{}: {}", summary.title, err)),
+                            Err(err) => failed.push(JobFailure {
+                                label: summary.title,
+                                detail: err.to_string(),
+                                retry: Some(RetryAction::SaveUrl(summary.url.clone())),
+                            }),
                         }
                     }
 
@@ -798,10 +921,6 @@ impl AppState {
     }
 
     pub(super) fn upload_selected(&mut self) {
-        if self.background_job_active() {
-            self.set_status("Another save, fetch, or upload job is already running. Wait for it to finish or cancel it first.");
-            return;
-        }
         if self.lq.api_key.trim().is_empty() {
             self.set_status("Open LingQ settings and save a token first.");
             return;
@@ -828,6 +947,88 @@ impl AppState {
         let api_key = self.lq.api_key.clone();
         let language = self.lq.language.clone();
         let collection_id = self.lq.selected_collection;
+        self.enqueue_job(QueuedJob::UploadArticles {
+            ids,
+            api_key,
+            language,
+            collection_id,
+        });
+    }
+
+    pub(super) fn retry_failed_items(&mut self) {
+        if self.failed_items.is_empty() {
+            self.set_status("There are no failed items to retry.");
+            return;
+        }
+
+        let failures = std::mem::take(&mut self.failed_items);
+        let mut save_urls = Vec::new();
+        let mut upload_ids = Vec::new();
+        let mut not_retryable = Vec::new();
+
+        for failure in failures {
+            match failure.retry.clone() {
+                Some(RetryAction::SaveUrl(url)) => save_urls.push(url),
+                Some(RetryAction::UploadArticle(id)) => upload_ids.push(id),
+                None => not_retryable.push(failure),
+            }
+        }
+
+        self.failed_items = not_retryable;
+        self.dirty.activity = true;
+
+        let mut queued = 0usize;
+        if !save_urls.is_empty() {
+            save_urls.sort();
+            save_urls.dedup();
+            queued += save_urls.len();
+            self.enqueue_job(QueuedJob::SaveUrls {
+                urls: save_urls,
+                label: "Retry failed saves".to_owned(),
+            });
+        }
+
+        if !upload_ids.is_empty() {
+            if self.lq.api_key.trim().is_empty() {
+                self.set_status("Open LingQ settings and save a token before retrying uploads.");
+                self.failed_items.extend(upload_ids.into_iter().map(|id| JobFailure {
+                    label: format!("article #{id}"),
+                    detail: "LingQ token missing during retry.".to_owned(),
+                    retry: Some(RetryAction::UploadArticle(id)),
+                }));
+                self.dirty.activity = true;
+                self.sync_to_window();
+                return;
+            }
+            upload_ids.sort_unstable();
+            upload_ids.dedup();
+            queued += upload_ids.len();
+            self.enqueue_job(QueuedJob::UploadArticles {
+                ids: upload_ids,
+                api_key: self.lq.api_key.clone(),
+                language: self.lq.language.clone(),
+                collection_id: self.lq.selected_collection,
+            });
+        }
+
+        self.add_activity("queued", "Retry requested", format!("{queued} item(s) queued."));
+        self.set_status(format!("Queued {queued} failed item(s) for retry."));
+    }
+
+    pub(super) fn clear_failed_items(&mut self) {
+        let cleared = self.failed_items.len();
+        self.failed_items.clear();
+        self.add_activity("cleared", "Cleared retry list", format!("{cleared} item(s) removed."));
+        self.set_status("Cleared the retry list.");
+    }
+
+    fn start_upload_job(
+        &mut self,
+        ids: Vec<i64>,
+        api_key: String,
+        language: String,
+        collection_id: Option<i64>,
+    ) {
         self.cancel_flag.store(false, Ordering::Relaxed);
         self.progress = Some(FetchProgress {
             label: "Uploading to LingQ".to_owned(),
@@ -841,7 +1042,7 @@ impl AppState {
         let db = self.db.clone();
         let cancel = self.cancel_flag.clone();
         let handle = self.runtime.spawn(async move {
-            let result: Result<(usize, usize, Vec<String>, bool), String> = async {
+            let result: Result<(usize, usize, Vec<JobFailure>, bool), String> = async {
                 let mut uploaded = 0usize;
                 let mut skipped_already = 0usize;
                 let mut failed = Vec::new();
@@ -852,7 +1053,11 @@ impl AppState {
                 for (index, id) in ids.into_iter().enumerate() {
                     if cancel.load(Ordering::Relaxed) || tokio::time::Instant::now() > deadline {
                         if tokio::time::Instant::now() > deadline {
-                            failed.push("Upload timed out (15 min limit).".to_owned());
+                            failed.push(JobFailure {
+                                label: "Upload batch".to_owned(),
+                                detail: "Upload timed out (15 min limit).".to_owned(),
+                                retry: None,
+                            });
                             cancel.store(true, Ordering::Relaxed);
                         }
                         break;
@@ -863,9 +1068,18 @@ impl AppState {
                         }
                     }
                     let Some(article) = db.get_article(id).map_err(|err| format!("{err:#}"))? else {
-                        failed.push(format!("article #{id} not found"));
+                        failed.push(JobFailure {
+                            label: format!("article #{id}"),
+                            detail: "not found".to_owned(),
+                            retry: None,
+                        });
                         continue;
                     };
+                    let _ = tx.send(AppEvent::FetchProgress(FetchProgress {
+                        label: format!("Uploading {}", article.title),
+                        completed: index,
+                        total,
+                    }));
                     let request = UploadRequest {
                         api_key: api_key.clone(),
                         language_code: language.clone(),
@@ -896,15 +1110,20 @@ impl AppState {
                             if let Err(err) =
                                 db.mark_uploaded(article.id, response.lesson_id, &response.lesson_url)
                             {
-                                failed.push(format!(
-                                    "{} uploaded but DB update failed: {}",
-                                    article.title, err
-                                ));
+                                failed.push(JobFailure {
+                                    label: article.title,
+                                    detail: format!("uploaded but DB update failed: {err}"),
+                                    retry: Some(RetryAction::UploadArticle(article.id)),
+                                });
                             } else {
                                 uploaded += 1;
                             }
                         }
-                        Err(err) => failed.push(format!("{}: {}", article.title, err)),
+                        Err(err) => failed.push(JobFailure {
+                            label: article.title,
+                            detail: err.to_string(),
+                            retry: Some(RetryAction::UploadArticle(article.id)),
+                        }),
                     }
 
                     let _ = tx.send(AppEvent::FetchProgress(FetchProgress {
@@ -929,7 +1148,11 @@ impl AppState {
                 Err(err) => AppEvent::UploadFinished {
                     uploaded: 0,
                     skipped_already: 0,
-                    failed: vec![err],
+                    failed: vec![JobFailure {
+                        label: "Upload".to_owned(),
+                        detail: err,
+                        retry: None,
+                    }],
                     cancelled: false,
                 },
             };
@@ -1026,11 +1249,14 @@ impl AppState {
                     self.clear_current_job();
                     self.progress = None;
                     self.cancel_flag.store(false, Ordering::Relaxed);
+                    self.record_failures(&failed);
+                    self.add_activity("finished", "Fetch job finished", &message);
                     self.set_status(format!("{message}{}", format_failure_suffix(&failed)));
                     self.refresh_saved_urls();
                     self.refresh_stats();
                     self.load_library();
                     self.load_browse();
+                    self.start_next_job_if_idle();
                 }
                 AppEvent::SaveProgress(progress) => {
                     self.save_progress = Some(progress);
@@ -1041,10 +1267,15 @@ impl AppState {
                     self.clear_current_job();
                     self.save_progress = None;
                     self.cancel_flag.store(false, Ordering::Relaxed);
+                    self.record_failures(&failed);
+                    self.add_activity("finished", "Save job finished", &message);
                     self.set_status(format!("{message}{}", format_failure_suffix(&failed)));
+                    self.browse.selected.clear();
+                    self.dirty.browse = true;
                     self.refresh_saved_urls();
                     self.refresh_stats();
                     self.load_library();
+                    self.start_next_job_if_idle();
                 }
                 AppEvent::CollectionsLoaded(result) => match result {
                     Ok(collections) => {
@@ -1090,6 +1321,7 @@ impl AppState {
                     self.clear_current_job();
                     self.progress = None;
                     self.cancel_flag.store(false, Ordering::Relaxed);
+                    self.record_failures(&failed);
                     let prefix = if cancelled { "Cancelled. " } else { "" };
                     let skip_suffix = if skipped_already > 0 {
                         format!(" Skipped {skipped_already} already uploaded.")
@@ -1100,8 +1332,16 @@ impl AppState {
                         "{prefix}Uploaded {uploaded} article(s) to LingQ.{skip_suffix}{}",
                         format_failure_suffix(&failed)
                     ));
+                    self.add_activity(
+                        "finished",
+                        "LingQ upload finished",
+                        format!("{uploaded} uploaded, {} failed.", failed.len()),
+                    );
+                    self.lq.selected_articles.clear();
+                    self.dirty.library = true;
                     self.refresh_stats();
                     self.load_library();
+                    self.start_next_job_if_idle();
                 }
             }
         }

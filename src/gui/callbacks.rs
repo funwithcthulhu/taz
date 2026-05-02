@@ -395,6 +395,16 @@ pub(super) fn wire_callbacks(window: &AppWindow, state: &Rc<RefCell<AppState>>) 
         }
     });
 
+    let state_clone = state.clone();
+    window.on_retry_failed_items(move || {
+        state_clone.borrow_mut().retry_failed_items();
+    });
+
+    let state_clone = state.clone();
+    window.on_clear_failed_items(move || {
+        state_clone.borrow_mut().clear_failed_items();
+    });
+
     // Keyboard navigation: move selection up in library list
     let state_clone = state.clone();
     window.on_library_key_up(move || {
