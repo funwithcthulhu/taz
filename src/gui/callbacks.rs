@@ -171,6 +171,35 @@ pub(super) fn wire_callbacks(window: &AppWindow, state: &Rc<RefCell<AppState>>) 
     });
 
     let state_clone = state.clone();
+    window.on_library_set_duplicate_only(move |checked| {
+        let mut app = state_clone.borrow_mut();
+        app.library.duplicate_only = checked;
+        app.save_settings();
+        app.load_library();
+    });
+
+    let state_clone = state.clone();
+    window.on_library_apply_preset(move |index| {
+        let mut app = state_clone.borrow_mut();
+        app.apply_filter_preset(index.max(0) as usize);
+    });
+
+    let state_clone = state.clone();
+    window.on_set_article_density(move |index| {
+        let mut app = state_clone.borrow_mut();
+        app.article_density = ArticleDensity::from_index(index);
+        app.save_settings();
+        app.dirty.library = true;
+        app.dirty.browse = true;
+        app.sync_to_window();
+    });
+
+    let state_clone = state.clone();
+    window.on_open_library_folder(move || {
+        state_clone.borrow_mut().open_library_folder();
+    });
+
+    let state_clone = state.clone();
     window.on_library_toggle_select(move |index| {
         let mut app = state_clone.borrow_mut();
         if let Some(article_id) = app

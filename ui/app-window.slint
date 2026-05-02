@@ -66,6 +66,9 @@ export component AppWindow inherits Window {
     in-out property <bool> library-only-not-uploaded: false;
     in-out property <string> library-min-words: "";
     in-out property <string> library-max-words: "";
+    in-out property <bool> library-duplicate-only: false;
+    in-out property <int> library-filter-preset-index: 0;
+    in-out property <int> article-density-index: 0;
     in-out property <bool> show-library-filters: true;
     in-out property <bool> show-upload-tools: true;
     in-out property <int> lingq-collection-index: 0;
@@ -90,6 +93,8 @@ export component AppWindow inherits Window {
     in property <[string]> heading-labels;
     in property <[string]> section-labels;
     in property <[string]> sort-labels;
+    in property <[string]> filter-preset-labels;
+    in property <[string]> density-labels;
     in property <[string]> collection-labels;
     in property <string> status-message: "";
     in property <string> browse-summary: "";
@@ -130,6 +135,10 @@ export component AppWindow inherits Window {
     callback library-set-only-not-uploaded(bool);
     callback library-set-min-words(string);
     callback library-set-max-words(string);
+    callback library-set-duplicate-only(bool);
+    callback library-apply-preset(int);
+    callback set-article-density(int);
+    callback open-library-folder();
     callback library-toggle-select(int);
     callback library-select-article(int);
     callback library-delete-article(int);
@@ -659,6 +668,37 @@ export component AppWindow inherits Window {
                             }
                         }
 
+                        Panel {
+                            height: 34px;
+                            HorizontalLayout {
+                                padding: 5px;
+                                padding-left: 10px;
+                                padding-right: 10px;
+                                spacing: 6px;
+                                Text { text: "Tools"; color: #8190ab; font-size: 12px; font-weight: 700; vertical-alignment: center; }
+                                ComboBox {
+                                    model: root.filter-preset-labels;
+                                    current-index <=> root.library-filter-preset-index;
+                                    min-width: 170px;
+                                    selected(_) => { root.library-apply-preset(root.library-filter-preset-index); }
+                                }
+                                ComboBox {
+                                    model: root.density-labels;
+                                    current-index <=> root.article-density-index;
+                                    min-width: 120px;
+                                    max-width: 130px;
+                                    selected(_) => { root.set-article-density(root.article-density-index); }
+                                }
+                                CheckBox {
+                                    text: "Duplicates";
+                                    checked <=> root.library-duplicate-only;
+                                    toggled => { root.library-set-duplicate-only(self.checked); }
+                                }
+                                Button { text: "Open library folder"; clicked => { root.open-library-folder(); } }
+                                Rectangle { }
+                            }
+                        }
+
                         Text { text: root.library-summary; color: #9aa6be; font-size: 11px; }
 
                         // Library article list + preview split
@@ -709,7 +749,7 @@ export component AppWindow inherits Window {
                                         }
 
                                         for article[index] in root.library-rows : Panel {
-                                            min-height: 48px;
+                                            min-height: root.article-density-index == 0 ? 42px : 56px;
                                             panel-background: article.viewing ? #1e2f4a : (article.selected ? #20324d : #192232);
                                             panel-border: article.viewing ? #4488cc : (article.selected ? #5aa0ff : #2b364f);
                                             border-radius: 8px;
@@ -729,7 +769,7 @@ export component AppWindow inherits Window {
                                                         spacing: 1px;
                                                         HorizontalLayout {
                                                             spacing: 8px;
-                                                            Text { text: article.title; color: white; font-size: 13px; font-weight: 760; horizontal-stretch: 1; overflow: elide; }
+                                                            Text { text: article.title; color: white; font-size: root.article-density-index == 0 ? 12px : 14px; font-weight: 760; horizontal-stretch: 1; overflow: elide; }
                                                             Text { text: article.words + "w"; color: #6e8bb5; font-size: 11px; vertical-alignment: center; }
                                                             Rectangle {
                                                                 width: 22px; height: 16px; border-radius: 4px;
@@ -740,7 +780,7 @@ export component AppWindow inherits Window {
                                                             if article.paywalled : Text { text: "Paywall"; color: #e76f51; font-size: 11px; font-weight: 700; vertical-alignment: center; }
                                                             Text { text: article.uploaded ? "LingQ" : "Local"; color: article.uploaded ? #7ce2a4 : #9aa6be; font-size: 11px; vertical-alignment: center; }
                                                         }
-                                                        Text { text: article.section; color: #6e8bb5; font-size: 11px; }
+                                                        Text { text: article.section; color: #6e8bb5; font-size: root.article-density-index == 0 ? 10px : 11px; }
                                                     }
                                                     TouchArea { mouse-cursor: pointer; clicked => { root.library-select-article(index); } }
                                                 }

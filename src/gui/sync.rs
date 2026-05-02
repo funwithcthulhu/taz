@@ -20,8 +20,11 @@ impl AppState {
         self.library.only_not_uploaded = window.get_library_only_not_uploaded();
         self.library.min_words = window.get_library_min_words().to_string();
         self.library.max_words = window.get_library_max_words().to_string();
+        self.library.duplicate_only = window.get_library_duplicate_only();
+        self.library.filter_preset_index = window.get_library_filter_preset_index().max(0) as usize;
         self.library.show_filters = window.get_show_library_filters();
         self.library.show_upload_tools = window.get_show_upload_tools();
+        self.article_density = ArticleDensity::from_index(window.get_article_density_index());
         self.lq.min_words = window.get_lingq_min_words().to_string();
         self.lq.max_words = window.get_lingq_max_words().to_string();
         self.lq.only_not_uploaded = window.get_lingq_only_not_uploaded();
@@ -88,6 +91,7 @@ impl AppState {
         s.library_only_not_uploaded = self.library.only_not_uploaded;
         s.library_min_words.clone_from(&self.library.min_words);
         s.library_max_words.clone_from(&self.library.max_words);
+        s.library_duplicate_only = self.library.duplicate_only;
         s.lingq_language.clone_from(&self.lq.language);
         s.lingq_only_not_uploaded = self.lq.only_not_uploaded;
         s.lingq_min_words.clone_from(&self.lq.min_words);
@@ -95,6 +99,7 @@ impl AppState {
         s.show_library_filters = self.library.show_filters;
         s.show_upload_tools = self.library.show_upload_tools;
         s.preview_wide = self.library.preview_wide;
+        s.article_density = self.article_density.setting().to_owned();
         s.auto_fetch_on_startup = self.bulk.auto_fetch_on_startup;
 
         let _ = self.settings.save();
@@ -153,12 +158,31 @@ impl AppState {
         // Most filtering and sorting is now done in SQL (see build_library_query).
         // Only heading filtering remains here since it maps sections to app-level categories.
         let heading = self.library.heading.trim();
+        let duplicate_titles = if self.library.duplicate_only {
+            let mut counts = std::collections::HashMap::<String, usize>::new();
+            for article in &self.library.articles {
+                *counts.entry(normalized_duplicate_title(&article.title)).or_default() += 1;
+            }
+            Some(counts)
+        } else {
+            None
+        };
 
         self.library.articles
             .iter()
             .filter(|article| {
                 if heading != "All headings" && !heading.is_empty() {
                     if section_heading(&article.section) != heading {
+                        return false;
+                    }
+                }
+                if let Some(counts) = &duplicate_titles {
+                    if counts
+                        .get(&normalized_duplicate_title(&article.title))
+                        .copied()
+                        .unwrap_or(0)
+                        < 2
+                    {
                         return false;
                     }
                 }
@@ -204,8 +228,11 @@ impl AppState {
         window.set_library_only_not_uploaded(self.library.only_not_uploaded);
         window.set_library_min_words(self.library.min_words.clone().into());
         window.set_library_max_words(self.library.max_words.clone().into());
+        window.set_library_duplicate_only(self.library.duplicate_only);
+        window.set_library_filter_preset_index(self.library.filter_preset_index as i32);
         window.set_show_library_filters(self.library.show_filters);
         window.set_show_upload_tools(self.library.show_upload_tools);
+        window.set_article_density_index(self.article_density.index());
         window.set_lingq_min_words(self.lq.min_words.clone().into());
         window.set_lingq_max_words(self.lq.max_words.clone().into());
         window.set_lingq_only_not_uploaded(self.lq.only_not_uploaded);
@@ -330,6 +357,14 @@ impl AppState {
                 .into_iter()
                 .map(|mode| SharedString::from(mode.label()))
                 .collect::<Vec<_>>();
+            let preset_labels = filter_preset_labels()
+                .into_iter()
+                .map(SharedString::from)
+                .collect::<Vec<_>>();
+            let density_labels = ArticleDensity::all()
+                .into_iter()
+                .map(|density| SharedString::from(density.label()))
+                .collect::<Vec<_>>();
             let heading_index = index_of_label(&self.library.cached_heading_labels, &self.library.heading);
             let section_index = index_of_label(&self.library.cached_section_labels, &self.library.section);
             window.set_heading_labels(ModelRc::from(Rc::new(VecModel::from(
@@ -347,6 +382,8 @@ impl AppState {
                     .collect::<Vec<_>>(),
             ))));
             window.set_sort_labels(ModelRc::from(Rc::new(VecModel::from(sort_labels))));
+            window.set_filter_preset_labels(ModelRc::from(Rc::new(VecModel::from(preset_labels))));
+            window.set_density_labels(ModelRc::from(Rc::new(VecModel::from(density_labels))));
             window.set_library_heading_index(heading_index as i32);
             window.set_library_section_index(section_index as i32);
 

@@ -25,6 +25,7 @@ pub struct AppSettings {
     pub library_only_not_uploaded: bool,
     pub library_min_words: String,
     pub library_max_words: String,
+    pub library_duplicate_only: bool,
 
     // LingQ settings
     pub lingq_language: String,
@@ -38,6 +39,7 @@ pub struct AppSettings {
     pub show_library_filters: bool,
     pub show_upload_tools: bool,
     pub preview_wide: bool,
+    pub article_density: String,
 
     // Auto-fetch
     pub auto_fetch_on_startup: bool,
@@ -58,6 +60,7 @@ impl Default for AppSettings {
             library_only_not_uploaded: false,
             library_min_words: String::new(),
             library_max_words: String::new(),
+            library_duplicate_only: false,
             lingq_language: "de".to_owned(),
             lingq_api_key: String::new(),
             lingq_collection_id: None,
@@ -67,6 +70,7 @@ impl Default for AppSettings {
             show_library_filters: true,
             show_upload_tools: true,
             preview_wide: false,
+            article_density: "compact".to_owned(),
             auto_fetch_on_startup: false,
         }
     }
@@ -209,6 +213,8 @@ mod tests {
             s.browse_section = "kultur".to_owned();
             s.browse_only_new = false;
             s.library_sort = "title".to_owned();
+            s.library_duplicate_only = true;
+            s.article_density = "comfortable".to_owned();
             s.lingq_language = "fr".to_owned();
             s.bulk_max_articles = "100".to_owned();
         }).unwrap();
@@ -219,6 +225,8 @@ mod tests {
         assert_eq!(d.browse_section, "kultur");
         assert_eq!(d.browse_only_new, false);
         assert_eq!(d.library_sort, "title");
+        assert!(d.library_duplicate_only);
+        assert_eq!(d.article_density, "comfortable");
         assert_eq!(d.lingq_language, "fr");
         assert_eq!(d.bulk_max_articles, "100");
 

@@ -955,6 +955,91 @@ impl AppState {
         });
     }
 
+    pub(super) fn apply_filter_preset(&mut self, index: usize) {
+        self.library.filter_preset_index = index;
+        match index {
+            1 => {
+                self.library.min_words = "600".to_owned();
+                self.library.max_words = "999".to_owned();
+                self.library.only_not_uploaded = true;
+                self.library.duplicate_only = false;
+                self.lq.min_words = "600".to_owned();
+                self.lq.max_words = "999".to_owned();
+                self.lq.only_not_uploaded = true;
+            }
+            2 => {
+                self.library.min_words = "1000".to_owned();
+                self.library.max_words = "1800".to_owned();
+                self.library.only_not_uploaded = true;
+                self.library.duplicate_only = false;
+                self.lq.min_words = "1000".to_owned();
+                self.lq.max_words = "1800".to_owned();
+                self.lq.only_not_uploaded = true;
+            }
+            3 => {
+                self.library.min_words = "1800".to_owned();
+                self.library.max_words.clear();
+                self.library.only_not_uploaded = true;
+                self.library.duplicate_only = false;
+                self.lq.min_words = "1800".to_owned();
+                self.lq.max_words.clear();
+                self.lq.only_not_uploaded = true;
+            }
+            4 => {
+                self.library.only_not_uploaded = true;
+                self.library.duplicate_only = false;
+                self.lq.only_not_uploaded = true;
+            }
+            5 => {
+                self.library.duplicate_only = true;
+                self.library.only_not_uploaded = false;
+                self.lq.only_not_uploaded = false;
+            }
+            _ => {
+                self.library.duplicate_only = false;
+            }
+        }
+        self.save_settings();
+        self.add_activity(
+            "filter",
+            "Applied library preset",
+            filter_preset_labels()
+                .get(index)
+                .copied()
+                .unwrap_or("No preset"),
+        );
+        self.load_library();
+        self.sync_to_window();
+    }
+
+    pub(super) fn open_library_folder(&mut self) {
+        match crate::app_data_dir() {
+            Ok(path) => {
+                #[cfg(windows)]
+                let opened = std::process::Command::new("explorer")
+                    .arg(&path)
+                    .spawn()
+                    .map(|_| ());
+
+                #[cfg(not(windows))]
+                let opened = webbrowser::open(path.to_string_lossy().as_ref()).map(|_| ());
+
+                match opened {
+                    Ok(()) => {
+                        self.add_activity(
+                            "opened",
+                            "Opened library folder",
+                            path.display().to_string(),
+                        );
+                        self.set_status("Opened the local library folder.");
+                    }
+                    Err(err) => self.set_status(format!("Could not open library folder: {err}")),
+                }
+            }
+            Err(err) => self.set_status(format!("Could not locate library folder: {err:#}")),
+        }
+    }
+
     pub(super) fn retry_failed_items(&mut self) {
         if self.failed_items.is_empty() {
             self.set_status("There are no failed items to retry.");

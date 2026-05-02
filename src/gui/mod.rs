@@ -82,6 +82,53 @@ impl LibrarySortMode {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ArticleDensity {
+    Compact,
+    Comfortable,
+}
+
+impl ArticleDensity {
+    fn all() -> [Self; 2] {
+        [Self::Compact, Self::Comfortable]
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Compact => "Compact",
+            Self::Comfortable => "Comfortable",
+        }
+    }
+
+    fn from_index(index: i32) -> Self {
+        Self::all()
+            .get(index.max(0) as usize)
+            .copied()
+            .unwrap_or(Self::Compact)
+    }
+
+    fn from_setting(value: &str) -> Self {
+        match value {
+            "comfortable" => Self::Comfortable,
+            _ => Self::Compact,
+        }
+    }
+
+    fn index(self) -> i32 {
+        match self {
+            Self::Compact => 0,
+            Self::Comfortable => 1,
+        }
+    }
+
+    fn setting(self) -> &'static str {
+        match self {
+            Self::Compact => "compact",
+            Self::Comfortable => "comfortable",
+        }
+    }
+}
+
 #[derive(Clone)]
 struct FetchProgress {
     label: String,
@@ -242,6 +289,8 @@ struct LibraryState {
     only_not_uploaded: bool,
     min_words: String,
     max_words: String,
+    duplicate_only: bool,
+    filter_preset_index: usize,
     show_filters: bool,
     show_upload_tools: bool,
     delete_confirm_id: Option<i64>,
@@ -299,6 +348,7 @@ struct AppState {
     /// Signals all background tasks to stop when the app is shutting down.
     shutdown_flag: Arc<AtomicBool>,
     settings_dirty: bool,
+    article_density: ArticleDensity,
 
     // ── Page state ──
     browse: BrowseState,
@@ -462,6 +512,18 @@ pub fn run() -> Result<(), slint::PlatformError> {
     window.set_heading_labels(ModelRc::from(Rc::new(VecModel::from(Vec::<SharedString>::new()))));
     window.set_section_labels(ModelRc::from(Rc::new(VecModel::from(Vec::<SharedString>::new()))));
     window.set_sort_labels(ModelRc::from(Rc::new(VecModel::from(Vec::<SharedString>::new()))));
+    window.set_filter_preset_labels(ModelRc::from(Rc::new(VecModel::from(
+        filter_preset_labels()
+            .into_iter()
+            .map(SharedString::from)
+            .collect::<Vec<_>>(),
+    ))));
+    window.set_density_labels(ModelRc::from(Rc::new(VecModel::from(
+        ArticleDensity::all()
+            .into_iter()
+            .map(|density| SharedString::from(density.label()))
+            .collect::<Vec<_>>(),
+    ))));
     window.set_collection_labels(ModelRc::from(Rc::new(VecModel::from(vec![
         SharedString::from("No course selected"),
     ]))));
@@ -492,6 +554,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
         "title" => LibrarySortMode::Title,
         _ => LibrarySortMode::Newest,
     };
+    let article_density = ArticleDensity::from_setting(&sd.article_density);
     let (tx, rx) = mpsc::channel();
     let runtime = Arc::new(
         Runtime::new().expect("failed to create tokio runtime"),
@@ -521,6 +584,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
         cancel_flag: Arc::new(AtomicBool::new(false)),
         shutdown_flag: Arc::new(AtomicBool::new(false)),
         settings_dirty: false,
+        article_density,
         browse: BrowseState {
             section_index: browse_section_index,
             limit: 80,
@@ -551,6 +615,8 @@ pub fn run() -> Result<(), slint::PlatformError> {
             only_not_uploaded: sd.library_only_not_uploaded,
             min_words: sd.library_min_words,
             max_words: sd.library_max_words,
+            duplicate_only: sd.library_duplicate_only,
+            filter_preset_index: 0,
             show_filters: sd.show_library_filters,
             show_upload_tools: sd.show_upload_tools,
             delete_confirm_id: None,
@@ -722,6 +788,25 @@ fn indexed_label(labels: &[String], index: i32) -> String {
         .get(index.max(0) as usize)
         .cloned()
         .unwrap_or_else(|| labels.first().cloned().unwrap_or_default())
+}
+
+fn filter_preset_labels() -> Vec<&'static str> {
+    vec![
+        "No preset",
+        "Short LingQ (600-999)",
+        "Standard LingQ (1000-1800)",
+        "Long reads (1800+)",
+        "Not uploaded",
+        "Duplicates",
+    ]
+}
+
+fn normalized_duplicate_title(title: &str) -> String {
+    title
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
 }
 
 #[cfg(test)]
@@ -904,5 +989,13 @@ mod tests {
     fn sort_mode_invalid_index_defaults() {
         assert_eq!(LibrarySortMode::from_index(-1), LibrarySortMode::Newest);
         assert_eq!(LibrarySortMode::from_index(99), LibrarySortMode::Newest);
+    }
+
+    #[test]
+    fn article_density_roundtrip() {
+        for density in ArticleDensity::all() {
+            assert_eq!(ArticleDensity::from_index(density.index()), density);
+            assert_eq!(ArticleDensity::from_setting(density.setting()), density);
+        }
     }
 }
