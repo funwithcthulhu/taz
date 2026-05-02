@@ -347,6 +347,13 @@ pub(super) fn wire_callbacks(window: &AppWindow, state: &Rc<RefCell<AppState>>) 
     });
 
     let state_clone = state.clone();
+    window.on_lingq_sync_status(move || {
+        let mut app = state_clone.borrow_mut();
+        app.pull_inputs_from_window();
+        app.sync_lingq_status();
+    });
+
+    let state_clone = state.clone();
     window.on_lingq_disconnect(move || {
         let mut app = state_clone.borrow_mut();
         app.lq.api_key.clear();

@@ -4,7 +4,7 @@ mod sync;
 
 use crate::{
     database::{ArticleQuery, Database, LibraryStats, StoredArticle, StoredArticleMeta},
-    lingq::{Collection, LingqClient, UploadRequest},
+    lingq::{Collection, LingqClient, RemoteLesson, UploadRequest},
     settings::{self, SettingsStore},
     taz::{ArticleSummary, BrowseSectionResult, Section, TazClient},
 };
@@ -176,6 +176,11 @@ enum QueuedJob {
         language: String,
         collection_id: Option<i64>,
     },
+    SyncLingqCourse {
+        api_key: String,
+        language: String,
+        collection_id: i64,
+    },
 }
 
 impl QueuedJob {
@@ -191,6 +196,9 @@ impl QueuedJob {
                 section_ids.len()
             ),
             Self::UploadArticles { ids, .. } => format!("Upload {} article(s)", ids.len()),
+            Self::SyncLingqCourse { collection_id, .. } => {
+                format!("Sync LingQ status for course #{collection_id}")
+            }
         }
     }
 }
@@ -216,6 +224,13 @@ enum AppEvent {
     UploadFinished {
         uploaded: usize,
         skipped_already: usize,
+        failed: Vec<JobFailure>,
+        cancelled: bool,
+    },
+    LingqCourseSynced {
+        scanned: usize,
+        matched: usize,
+        ambiguous: usize,
         failed: Vec<JobFailure>,
         cancelled: bool,
     },
@@ -809,6 +824,63 @@ fn normalized_duplicate_title(title: &str) -> String {
         .to_lowercase()
 }
 
+fn normalized_lingq_url(url: &str) -> String {
+    let trimmed = url.trim();
+    let without_fragment = trimmed.split('#').next().unwrap_or(trimmed);
+    let without_query = without_fragment.split('?').next().unwrap_or(without_fragment);
+    without_query
+        .trim_end_matches('/')
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_start_matches("www.")
+        .to_lowercase()
+}
+
+fn match_lingq_lessons(
+    lessons: &[RemoteLesson],
+    articles: &[StoredArticleMeta],
+) -> (Vec<(i64, i64, String)>, usize) {
+    let mut by_url = std::collections::HashMap::<String, i64>::new();
+    let mut by_title = std::collections::HashMap::<String, Vec<i64>>::new();
+    for article in articles {
+        by_url.insert(normalized_lingq_url(&article.url), article.id);
+        by_title
+            .entry(normalized_duplicate_title(&article.title))
+            .or_default()
+            .push(article.id);
+    }
+
+    let mut matched_article_ids = HashSet::new();
+    let mut matches = Vec::new();
+    let mut ambiguous = 0usize;
+    for lesson in lessons {
+        let mut article_id = lesson
+            .original_url
+            .as_deref()
+            .map(normalized_lingq_url)
+            .and_then(|url| by_url.get(&url).copied());
+
+        if article_id.is_none() {
+            let title_key = normalized_duplicate_title(&lesson.title);
+            if let Some(ids) = by_title.get(&title_key) {
+                if ids.len() == 1 {
+                    article_id = ids.first().copied();
+                } else if ids.len() > 1 {
+                    ambiguous += 1;
+                }
+            }
+        }
+
+        if let Some(id) = article_id {
+            if matched_article_ids.insert(id) {
+                matches.push((id, lesson.id, lesson.lesson_url.clone()));
+            }
+        }
+    }
+
+    (matches, ambiguous)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -997,5 +1069,66 @@ mod tests {
             assert_eq!(ArticleDensity::from_index(density.index()), density);
             assert_eq!(ArticleDensity::from_setting(density.setting()), density);
         }
+    }
+
+    #[test]
+    fn lingq_matching_prefers_original_url() {
+        let articles = vec![StoredArticleMeta {
+            id: 42,
+            url: "https://taz.de/Foo/!123/?utm=abc".to_owned(),
+            title: "Different title".to_owned(),
+            subtitle: String::new(),
+            author: String::new(),
+            date: String::new(),
+            section: String::new(),
+            word_count: 1000,
+            difficulty: 3,
+            fetched_at: String::new(),
+            uploaded_to_lingq: false,
+            lingq_lesson_id: None,
+            lingq_lesson_url: String::new(),
+            paywalled: false,
+        }];
+        let lessons = vec![RemoteLesson {
+            id: 99,
+            title: "Remote title".to_owned(),
+            original_url: Some("https://www.taz.de/Foo/!123/".to_owned()),
+            lesson_url: "https://www.lingq.com/de/learn/lesson/99/".to_owned(),
+        }];
+
+        let (matches, ambiguous) = match_lingq_lessons(&lessons, &articles);
+        assert_eq!(ambiguous, 0);
+        assert_eq!(matches, vec![(42, 99, lessons[0].lesson_url.clone())]);
+    }
+
+    #[test]
+    fn lingq_matching_skips_ambiguous_titles() {
+        let make_article = |id| StoredArticleMeta {
+            id,
+            url: format!("https://taz.de/a{id}/"),
+            title: "Same title".to_owned(),
+            subtitle: String::new(),
+            author: String::new(),
+            date: String::new(),
+            section: String::new(),
+            word_count: 1000,
+            difficulty: 3,
+            fetched_at: String::new(),
+            uploaded_to_lingq: false,
+            lingq_lesson_id: None,
+            lingq_lesson_url: String::new(),
+            paywalled: false,
+        };
+        let articles = vec![make_article(1), make_article(2)];
+        let lessons = vec![RemoteLesson {
+            id: 99,
+            title: "Same title".to_owned(),
+            original_url: None,
+            lesson_url: "https://www.lingq.com/de/learn/lesson/99/".to_owned(),
+        }];
+
+        let (matches, ambiguous) = match_lingq_lessons(&lessons, &articles);
+        assert_eq!(matches.len(), 0);
+        assert_eq!(ambiguous, 1);
     }
 }

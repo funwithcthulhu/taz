@@ -324,6 +324,11 @@ impl AppState {
                 language,
                 collection_id,
             } => self.start_upload_job(ids, api_key, language, collection_id),
+            QueuedJob::SyncLingqCourse {
+                api_key,
+                language,
+                collection_id,
+            } => self.start_lingq_sync_job(api_key, language, collection_id),
         }
     }
 
@@ -1040,6 +1045,22 @@ impl AppState {
         }
     }
 
+    pub(super) fn sync_lingq_status(&mut self) {
+        if self.lq.api_key.trim().is_empty() {
+            self.set_status("Open LingQ settings and save a token first.");
+            return;
+        }
+        let Some(collection_id) = self.lq.selected_collection else {
+            self.set_status("Select a LingQ course before syncing status.");
+            return;
+        };
+        self.enqueue_job(QueuedJob::SyncLingqCourse {
+            api_key: self.lq.api_key.clone(),
+            language: self.lq.language.clone(),
+            collection_id,
+        });
+    }
+
     pub(super) fn retry_failed_items(&mut self) {
         if self.failed_items.is_empty() {
             self.set_status("There are no failed items to retry.");
@@ -1246,6 +1267,107 @@ impl AppState {
         self.set_current_job(handle);
     }
 
+    fn start_lingq_sync_job(&mut self, api_key: String, language: String, collection_id: i64) {
+        self.cancel_flag.store(false, Ordering::Relaxed);
+        self.progress = Some(FetchProgress {
+            label: "Syncing LingQ course".to_owned(),
+            completed: 0,
+            total: 3,
+        });
+        self.sync_to_window();
+
+        let tx = self.tx.clone();
+        let lingq = self.lingq.clone();
+        let db = self.db.clone();
+        let cancel = self.cancel_flag.clone();
+        let handle = self.runtime.spawn(async move {
+            let result: Result<(usize, usize, usize, Vec<JobFailure>, bool), String> = async {
+                let _ = tx.send(AppEvent::FetchProgress(FetchProgress {
+                    label: "Reading selected LingQ course".to_owned(),
+                    completed: 0,
+                    total: 3,
+                }));
+                let lessons = tokio::select! {
+                    _ = wait_for_cancel(cancel.clone()) => {
+                        return Ok((0, 0, 0, Vec::new(), true));
+                    }
+                    result = lingq.get_collection_lessons(&api_key, &language, collection_id) => {
+                        result.map_err(|err| format!("{err:#}"))?
+                    }
+                };
+
+                if cancel.load(Ordering::Relaxed) {
+                    return Ok((lessons.len(), 0, 0, Vec::new(), true));
+                }
+                let _ = tx.send(AppEvent::FetchProgress(FetchProgress {
+                    label: format!("Comparing {} LingQ lesson(s)", lessons.len()),
+                    completed: 1,
+                    total: 3,
+                }));
+                let articles = {
+                    let db = db.clone();
+                    tokio::task::spawn_blocking(move || {
+                        db.list_articles_meta(&ArticleQuery {
+                            limit: 100_000,
+                            ..ArticleQuery::default()
+                        })
+                    })
+                    .await
+                    .unwrap_or_else(|err| Err(anyhow::anyhow!("{err}")))
+                    .map_err(|err| format!("{err:#}"))?
+                };
+
+                let (matches, ambiguous) = match_lingq_lessons(&lessons, &articles);
+                let matched_count = matches.len();
+                let mut failed = Vec::new();
+                for (index, (article_id, lesson_id, lesson_url)) in matches.into_iter().enumerate()
+                {
+                    if cancel.load(Ordering::Relaxed) {
+                        return Ok((lessons.len(), index, ambiguous, failed, true));
+                    }
+                    if let Err(err) = db.mark_uploaded(article_id, lesson_id, &lesson_url) {
+                        failed.push(JobFailure {
+                            label: format!("article #{article_id}"),
+                            detail: format!("matched on LingQ but DB update failed: {err}"),
+                            retry: None,
+                        });
+                    }
+                }
+
+                let _ = tx.send(AppEvent::FetchProgress(FetchProgress {
+                    label: "LingQ status sync complete".to_owned(),
+                    completed: 3,
+                    total: 3,
+                }));
+                Ok((lessons.len(), matched_count, ambiguous, failed, false))
+            }
+            .await;
+
+            let event = match result {
+                Ok((scanned, matched, ambiguous, failed, cancelled)) => AppEvent::LingqCourseSynced {
+                    scanned,
+                    matched,
+                    ambiguous,
+                    failed,
+                    cancelled,
+                },
+                Err(err) => AppEvent::LingqCourseSynced {
+                    scanned: 0,
+                    matched: 0,
+                    ambiguous: 0,
+                    failed: vec![JobFailure {
+                        label: "LingQ sync".to_owned(),
+                        detail: err,
+                        retry: None,
+                    }],
+                    cancelled: false,
+                },
+            };
+            let _ = tx.send(event);
+        });
+        self.set_current_job(handle);
+    }
+
     pub(super) fn poll_events(&mut self) {
         while let Ok(event) = self.rx.try_recv() {
             match event {
@@ -1424,6 +1546,36 @@ impl AppState {
                     );
                     self.lq.selected_articles.clear();
                     self.dirty.library = true;
+                    self.refresh_stats();
+                    self.load_library();
+                    self.start_next_job_if_idle();
+                }
+                AppEvent::LingqCourseSynced {
+                    scanned,
+                    matched,
+                    ambiguous,
+                    failed,
+                    cancelled,
+                } => {
+                    self.clear_current_job();
+                    self.progress = None;
+                    self.cancel_flag.store(false, Ordering::Relaxed);
+                    self.record_failures(&failed);
+                    let prefix = if cancelled { "Cancelled. " } else { "" };
+                    let ambiguous_suffix = if ambiguous > 0 {
+                        format!(" {ambiguous} title match(es) were ambiguous and skipped.")
+                    } else {
+                        String::new()
+                    };
+                    self.set_status(format!(
+                        "{prefix}Synced LingQ status: scanned {scanned} lesson(s), matched {matched} local article(s).{ambiguous_suffix}{}",
+                        format_failure_suffix(&failed)
+                    ));
+                    self.add_activity(
+                        "finished",
+                        "LingQ status sync finished",
+                        format!("{matched} matched from {scanned} lesson(s)."),
+                    );
                     self.refresh_stats();
                     self.load_library();
                     self.start_next_job_if_idle();

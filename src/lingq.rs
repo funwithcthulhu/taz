@@ -14,6 +14,14 @@ pub struct Collection {
 }
 
 #[derive(Debug, Clone)]
+pub struct RemoteLesson {
+    pub id: i64,
+    pub title: String,
+    pub original_url: Option<String>,
+    pub lesson_url: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct UploadRequest {
     pub api_key: String,
     pub language_code: String,
@@ -58,6 +66,14 @@ struct LingqCollectionRow {
     lessons_count: Option<i64>,
     #[serde(rename = "lessons_count")]
     lessons_count_alt: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct LingqLessonPage {
+    results: Option<Vec<serde_json::Value>>,
+    lessons: Option<Vec<serde_json::Value>>,
+    items: Option<Vec<serde_json::Value>>,
+    next: Option<String>,
 }
 
 #[derive(Clone)]
@@ -145,6 +161,80 @@ impl LingqClient {
         }
 
         Ok(all_collections)
+    }
+
+    pub async fn get_collection_lessons(
+        &self,
+        api_key: &str,
+        language_code: &str,
+        collection_id: i64,
+    ) -> Result<Vec<RemoteLesson>> {
+        let candidate_urls = [
+            format!(
+                "{}/{}/collections/{}/lessons/",
+                LINGQ_BASE, language_code, collection_id
+            ),
+            format!(
+                "{}/{}/lessons/?collection={}",
+                LINGQ_BASE, language_code, collection_id
+            ),
+        ];
+
+        let mut last_error = None;
+        for url in candidate_urls {
+            match self.fetch_lesson_pages(api_key, language_code, &url).await {
+                Ok(lessons) => return Ok(lessons),
+                Err(err) => last_error = Some(err),
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("LingQ lesson lookup failed")))
+    }
+
+    async fn fetch_lesson_pages(
+        &self,
+        api_key: &str,
+        language_code: &str,
+        first_url: &str,
+    ) -> Result<Vec<RemoteLesson>> {
+        let mut lessons = Vec::new();
+        let mut url = Some(first_url.to_owned());
+        let max_pages = 50;
+        let mut page = 0;
+
+        while let Some(current_url) = url.take() {
+            page += 1;
+            if page > max_pages {
+                break;
+            }
+
+            let mut auth = reqwest::header::HeaderValue::from_str(&format!("Token {api_key}"))
+                .context("invalid API key characters")?;
+            auth.set_sensitive(true);
+            let response = self
+                .client
+                .get(&current_url)
+                .header("Authorization", auth)
+                .send()
+                .await
+                .context("LingQ lessons request failed")?;
+
+            let response = response
+                .error_for_status()
+                .context("LingQ rejected the lessons request")?;
+            let value: serde_json::Value = response
+                .json()
+                .await
+                .context("failed to parse LingQ lessons response")?;
+
+            let (mut rows, next) = extract_lesson_rows(value)?;
+            lessons.extend(rows.drain(..).filter_map(|row| {
+                parse_remote_lesson(row, language_code)
+            }));
+            url = next;
+        }
+
+        Ok(lessons)
     }
 
     pub async fn upload_lesson(&self, request: &UploadRequest) -> Result<UploadResponse> {
@@ -243,6 +333,67 @@ impl LingqClient {
             ),
         })
     }
+}
+
+fn extract_lesson_rows(value: serde_json::Value) -> Result<(Vec<serde_json::Value>, Option<String>)> {
+    if let Some(array) = value.as_array() {
+        return Ok((array.clone(), None));
+    }
+
+    let page: LingqLessonPage = serde_json::from_value(value)
+        .context("failed to decode LingQ lesson page")?;
+    let rows = page
+        .results
+        .or(page.lessons)
+        .or(page.items)
+        .unwrap_or_default();
+    Ok((rows, page.next))
+}
+
+fn parse_remote_lesson(value: serde_json::Value, language_code: &str) -> Option<RemoteLesson> {
+    let id = value
+        .get("id")
+        .or_else(|| value.get("pk"))
+        .and_then(|field| field.as_i64())?;
+    let title = value
+        .get("title")
+        .and_then(|field| field.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_owned();
+    if title.is_empty() {
+        return None;
+    }
+
+    let original_url = value
+        .get("original_url")
+        .or_else(|| value.get("originalUrl"))
+        .or_else(|| value.get("source_url"))
+        .or_else(|| value.get("sourceUrl"))
+        .and_then(|field| field.as_str())
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(str::to_owned);
+    let lesson_url = value
+        .get("url")
+        .or_else(|| value.get("lesson_url"))
+        .or_else(|| value.get("lessonUrl"))
+        .and_then(|field| field.as_str())
+        .filter(|url| url.starts_with("http"))
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            format!(
+                "https://www.lingq.com/{}/learn/lesson/{}/",
+                language_code, id
+            )
+        });
+
+    Some(RemoteLesson {
+        id,
+        title,
+        original_url,
+        lesson_url,
+    })
 }
 
 fn normalize_text(text: &str) -> String {

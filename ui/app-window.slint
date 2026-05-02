@@ -156,6 +156,7 @@ export component AppWindow inherits Window {
     callback lingq-login();
     callback lingq-refresh-collections();
     callback lingq-disconnect();
+    callback lingq-sync-status();
     callback library-search-accepted();
     callback browse-set-date-preset(int);
     callback toggle-preview-width();
@@ -663,6 +664,7 @@ export component AppWindow inherits Window {
                                 Button { text: "Clear"; clicked => { root.library-clear-upload-selection(); } }
                                 Button { text: "Delete Selected"; clicked => { root.library-delete-selected(); } }
                                 Button { text: "Upload"; enabled: !root.progress-visible; clicked => { root.library-upload-selected(); } }
+                                Button { text: "Sync status"; enabled: !root.progress-visible; clicked => { root.lingq-sync-status(); } }
                                 Rectangle { }
                                 Button { text: "Settings"; clicked => { root.lingq-open-settings(); } min-width: 60px; }
                             }
