@@ -18,8 +18,13 @@ This project is a Windows-native workflow for reading, saving, and uploading `ta
 - Save articles locally with metadata, clean text, and word counts.
 - Detect likely paywalled/truncated articles and label them in the library UI.
 - Filter the library by heading, section, upload status, and word count.
+- Use library presets for short LingQ reads, standard LingQ reads, long reads, not-uploaded items, and duplicate review.
+- Switch article-list density between compact and comfortable layouts.
+- Queue long-running save, fetch, upload, and LingQ sync jobs instead of letting overlapping actions collide.
+- Review recent activity and retry failed saves/uploads from the sidebar.
 - Preview cleaned article text before uploading.
 - Upload selected articles to a LingQ course/collection, or update an existing LingQ lesson with improved text.
+- Sync local LingQ status from the selected LingQ course by matching lesson original URLs and unambiguous titles.
 - Save LingQ credentials/settings in the local app data area.
 - Build a Windows installer and desktop/start-menu shortcuts.
 
@@ -92,6 +97,8 @@ That includes:
 - GUI/settings data
 - saved LingQ token information
 
+The GUI also has an **Open library folder** action for jumping directly to this location.
+
 ## Project Layout
 
 ```text
@@ -143,8 +150,23 @@ Expected output:
 
 `installer\output\taz-reader-setup.exe`
 
+## Release Helper
+
+To validate, build the installer, and optionally publish a GitHub release:
+
+```powershell
+# Validate and build only
+.\scripts\release.ps1
+
+# Validate, build, and publish/update the GitHub release for the Cargo.toml version
+.\scripts\release.ps1 -Publish
+```
+
+The release helper runs serial tests, builds the installer, computes a SHA256 checksum, and uses GitHub CLI to create or update the release asset.
+
 ## Notes
 
 - The executable embeds the `taz` icon on Windows via `build.rs`.
 - The release binary is configured to hide the console window on Windows.
 - The app is designed as a native desktop executable, not a local web server.
+- Public builds are currently unsigned, so Windows may show an Unknown publisher or SmartScreen warning.

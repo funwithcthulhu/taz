@@ -38,9 +38,11 @@ Write-Host "Using: $iscc"
 if ($LASTEXITCODE -ne 0) { throw "Inno Setup compilation failed" }
 
 $exe = Get-Item "installer\output\taz-reader-setup.exe"
+$hash = (Get-FileHash -Path $exe.FullName -Algorithm SHA256).Hash
 Write-Host ""
 Write-Host "=== Done! ===" -ForegroundColor Green
 Write-Host "Installer: $($exe.FullName)" -ForegroundColor Yellow
 Write-Host "File size: $([math]::Round($exe.Length / 1MB, 1)) MB"
+Write-Host "SHA256: $hash"
 Write-Host ""
 Write-Host "Double-click taz-reader-setup.exe to install." -ForegroundColor Gray
