@@ -1,138 +1,70 @@
-# taz Reader
+# Taz Reader
 
-Desktop app and CLI for discovering articles from `taz.de`, saving them into a local library, and uploading selected texts to LingQ.
+Taz Reader is a Windows desktop app for browsing articles from [`taz.de`](https://taz.de), saving them in a local library, and uploading selected texts to LingQ.
 
-This project is a Windows-native workflow for reading, saving, and uploading `taz.de` articles:
+This repository ships a GUI application. It does not include a supported CLI or a stable library API.
 
-- Slint desktop GUI
-- async `taz.de` article discovery and extraction
-- local SQLite article library
-- LingQ login or saved API token support
-- Windows installer build with Inno Setup
+## What It Does
 
-## Current Highlights
+- Browse built-in `taz.de` sections and related topic pages.
+- Search `taz.de` from inside the app.
+- Save cleaned article text, metadata, word counts, and paywall hints in a local SQLite library.
+- Filter the library by title, section, upload status, duplicate likelihood, and word count.
+- Preview cleaned article text before uploading it.
+- Upload selected articles to a LingQ course or refresh an existing LingQ lesson with cleaned text.
+- Sync LingQ lesson status back into the local library.
+- Build a Windows installer.
 
-- Browse built-in `taz.de` sections and load more article candidates.
-- Search and discover across section pages and related topic pages.
-- Auto-fetch recent articles on startup if you enable it in the GUI.
-- Save articles locally with metadata, clean text, and word counts.
-- Detect likely paywalled/truncated articles and label them in the library UI.
-- Filter the library by heading, section, upload status, and word count.
-- Use library presets for short LingQ reads, standard LingQ reads, long reads, not-uploaded items, and duplicate review.
-- Switch article-list density between compact and comfortable layouts.
-- Queue long-running save, fetch, upload, and LingQ sync jobs instead of letting overlapping actions collide.
-- Review recent activity and retry failed saves/uploads from the sidebar.
-- Preview cleaned article text before uploading.
-- Upload selected articles to a LingQ course/collection, or update an existing LingQ lesson with improved text.
-- Sync local LingQ status from the selected LingQ course by matching lesson original URLs and unambiguous titles.
-- Save LingQ credentials/settings in the local app data area.
-- Build a Windows installer and desktop/start-menu shortcuts.
+## Quick Start
 
-## Tech Stack
-
-- Rust 2024
-- Slint for the desktop UI
-- Tokio + Reqwest for async networking
-- Scraper + Regex for HTML extraction
-- Rusqlite for the local library
-- Inno Setup for the Windows installer
-
-## Running The App
-
-Launch the GUI:
-
-```powershell
-cargo run -- gui
-```
-
-Or just:
+### Run the app from source
 
 ```powershell
 cargo run
 ```
 
-## CLI Commands
+This launches the GUI.
 
-```powershell
-# List built-in section shortcuts
-cargo run -- sections
-
-# Browse a built-in taz section
-cargo run -- browse --section politik --limit 15
-
-# Browse an arbitrary taz URL directly
-cargo run -- browse-url --url https://taz.de/Politik/!p4615/ --limit 15
-
-# Fetch a single article and print the cleaned text
-cargo run -- fetch --url https://taz.de/Vertrauen-in-die-Politik/!6073221/
-
-# Fetch and also save it into the local library
-cargo run -- fetch --url https://taz.de/Vertrauen-in-die-Politik/!6073221/ --save
-
-# Show saved articles
-cargo run -- library --limit 20
-
-# Upload a saved article to LingQ
-cargo run -- upload --id 1 --api-key YOUR_LINGQ_API_KEY
-```
-
-## LingQ Authentication
-
-The app supports multiple ways to get a LingQ token:
-
-- pass `--api-key` on the CLI
-- set `LINGQ_API_KEY`
-- save a token in the GUI settings
-- log in from the GUI and let the app save the token locally
-
-## Local Storage
-
-App data is stored under:
-
-`%LOCALAPPDATA%\taz_lingq_tool\`
-
-That includes:
-
-- the SQLite database
-- GUI/settings data
-- saved LingQ token information
-
-The GUI also has an **Open library folder** action for jumping directly to this location.
-
-## Project Layout
-
-```text
-src/
-  gui/                  Slint GUI state, callbacks, actions, sync
-  database.rs           SQLite storage and queries
-  lingq.rs              LingQ login, course listing, upload logic
-  settings.rs           Persistent app settings and token loading
-  taz.rs                taz.de discovery and article extraction
-ui/
-  app-window.slint      Main Slint UI definition
-assets/
-  taz.ico               Embedded Windows app icon
-installer/
-  taz-reader.iss        Inno Setup installer definition
-scripts/
-  build-installer.ps1   Release + installer build helper
-```
-
-## Building
-
-Debug build:
-
-```powershell
-cargo build
-```
-
-Release build:
+### Build a release binary
 
 ```powershell
 cargo build --release
 ```
 
-## Building The Windows Installer
+### Validate the repo
+
+```powershell
+cargo test -- --test-threads=1
+cargo clippy --all-targets -- -D warnings
+```
+
+## LingQ Authentication
+
+Taz Reader stores the LingQ token in the app data directory as a separate file, not inside `settings.json`.
+
+You can:
+
+- paste a LingQ token into the GUI settings
+- log in through the GUI and let the app save the token for you
+- refresh course lists and sync status from inside the GUI
+
+## Local Data
+
+Taz Reader stores app data under:
+
+`%LOCALAPPDATA%\taz-reader\`
+
+That includes:
+
+- the SQLite library database
+- settings and UI state
+- the saved LingQ token file
+
+Older installs that used `%LOCALAPPDATA%\taz_lingq_tool\` are migrated automatically on first run after the rename.
+
+The GUI includes an **Open library folder** action for jumping directly to this location.
+
+## Windows Installer
 
 One-time prerequisite:
 
@@ -140,7 +72,7 @@ One-time prerequisite:
 winget install JRSoftware.InnoSetup
 ```
 
-Then build the installer:
+Build the installer:
 
 ```powershell
 .\scripts\build-installer.ps1
@@ -150,7 +82,9 @@ Expected output:
 
 `installer\output\taz-reader-setup.exe`
 
-## Release Helper
+The installer build script reads the version from `Cargo.toml`, builds the release binary, and passes the version through to Inno Setup so packaging metadata stays in sync.
+
+## Release Workflow
 
 To validate, build the installer, and optionally publish a GitHub release:
 
@@ -162,11 +96,46 @@ To validate, build the installer, and optionally publish a GitHub release:
 .\scripts\release.ps1 -Publish
 ```
 
-The release helper runs serial tests, builds the installer, computes a SHA256 checksum, and uses GitHub CLI to create or update the release asset.
+The release helper:
+
+- runs the test suite serially
+- runs strict Clippy checks
+- builds the Windows installer
+- computes a SHA256 checksum
+- creates or updates the GitHub release asset through GitHub CLI
+
+## Project Layout
+
+```text
+src/
+  gui/                  Slint UI state, callbacks, background work, view sync
+  taz/                  taz.de discovery, extraction, cleanup, shared models
+  database.rs           SQLite storage, queries, migrations
+  lingq.rs              LingQ login, course listing, uploads, lesson sync
+  settings.rs           Persistent settings and token storage
+  lib.rs                App-data paths and migration helpers
+ui/
+  app-window.slint      Main Slint UI definition
+assets/
+  taz.ico               Embedded Windows app icon
+installer/
+  taz-reader.iss        Inno Setup installer definition
+scripts/
+  build-installer.ps1   Installer build helper
+  release.ps1           Test, lint, package, and optional GitHub release helper
+```
+
+## Tech Stack
+
+- Rust 2024
+- Slint for the desktop UI
+- Tokio + Reqwest for async networking
+- Scraper + Regex for extraction and cleanup
+- Rusqlite for the local article library
+- Inno Setup for Windows packaging
 
 ## Notes
 
-- The executable embeds the `taz` icon on Windows via `build.rs`.
-- The release binary is configured to hide the console window on Windows.
-- The app is designed as a native desktop executable, not a local web server.
+- The project targets Windows and runs as a native desktop executable.
+- The release binary hides the console window on Windows.
 - Public builds are currently unsigned, so Windows may show an Unknown publisher or SmartScreen warning.

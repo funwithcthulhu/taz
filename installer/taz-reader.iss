@@ -1,4 +1,4 @@
-; taz Reader — Inno Setup installer script
+; Taz Reader — Inno Setup installer script
 ;
 ; Prerequisites:
 ;   1. Install Inno Setup:  winget install JRSoftware.InnoSetup
@@ -8,10 +8,12 @@
 ;
 ; Output: installer\output\taz-reader-setup.exe
 
-#define MyAppName "taz Reader"
+#define MyAppName "Taz Reader"
+#ifndef MyAppVersion
 #define MyAppVersion "1.2.0"
+#endif
 #define MyAppPublisher "Tom Boeding"
-#define MyAppExeName "taz_lingq_tool.exe"
+#define MyAppExeName "taz-reader.exe"
 
 [Setup]
 AppId={{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}
@@ -45,6 +47,7 @@ Name: "startmenu"; Description: "Create a Start Menu shortcut"; GroupDescription
 Source: "..\target\release\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 
 [InstallDelete]
+Type: files; Name: "{app}\taz_lingq_tool.exe"
 Type: files; Name: "{userprograms}\taz_lingq_tool.lnk"
 Type: files; Name: "{autodesktop}\taz_lingq_tool.lnk"
 

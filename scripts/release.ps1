@@ -1,14 +1,12 @@
-# release.ps1 - Validate, build installer, and optionally publish a GitHub release.
+# Validate the repo, build the installer, and optionally publish a GitHub release.
 #
 # Usage:
 #   .\scripts\release.ps1
 #   .\scripts\release.ps1 -Publish
-#
-# The version is read from Cargo.toml. Publishing requires GitHub CLI auth.
 
 param(
     [switch]$Publish,
-    [string]$Repo = "funwithcthulhu/taz"
+    [string]$Repo = "funwithcthulhu/taz-reader"
 )
 
 $ErrorActionPreference = "Stop"
@@ -23,9 +21,14 @@ $version = Get-CargoVersion
 $tag = "v$version"
 $installer = "installer\output\taz-reader-setup.exe"
 
-Write-Host "=== Validating taz Reader $version ===" -ForegroundColor Cyan
+Write-Host "=== Validating Taz Reader $version ===" -ForegroundColor Cyan
 cargo test -- --test-threads=1
 if ($LASTEXITCODE -ne 0) { throw "cargo test failed" }
+
+Write-Host ""
+Write-Host "=== Running Clippy ===" -ForegroundColor Cyan
+cargo clippy --all-targets -- -D warnings
+if ($LASTEXITCODE -ne 0) { throw "cargo clippy failed" }
 
 Write-Host ""
 Write-Host "=== Building installer ===" -ForegroundColor Cyan
@@ -48,25 +51,19 @@ gh auth status | Out-Host
 if ($LASTEXITCODE -ne 0) { throw "GitHub CLI is not authenticated" }
 
 $notes = @"
-Windows installer for taz Reader $version.
-
-Highlights:
-- Serial job queue for save/fetch/upload/sync work.
-- Retry list and activity feed for failed operations.
-- Library presets, duplicate-only filtering, article density modes, and open-folder action.
-- LingQ status sync against the selected course.
-
-This build is unsigned, so Windows may show an Unknown publisher or SmartScreen warning on first install.
+Windows installer for Taz Reader $version.
 
 SHA256:
 $hash
+
+This build is unsigned, so Windows may show an Unknown publisher or SmartScreen warning on first install.
 "@
 
 $existing = gh release view $tag --repo $Repo --json tagName 2>$null
 if ($LASTEXITCODE -eq 0 -and $existing) {
     gh release upload $tag "$installer#taz-reader-setup.exe" --repo $Repo --clobber
 } else {
-    gh release create $tag "$installer#taz-reader-setup.exe" --repo $Repo --target main --title "taz Reader $version" --notes $notes --latest
+    gh release create $tag "$installer#taz-reader-setup.exe" --repo $Repo --target main --title "Taz Reader $version" --notes $notes --latest
 }
 
 Write-Host ""

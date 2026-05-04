@@ -4,10 +4,12 @@ mod sync;
 
 use crate::{
     database::{ArticleQuery, Database, LibraryStats, StoredArticle, StoredArticleMeta},
+    identity::article_key_from_url,
     lingq::{Collection, LingqClient, RemoteLesson, UploadRequest},
     settings::{self, SettingsStore},
     taz::{ArticleSummary, BrowseSectionResult, Section, TazClient},
 };
+use anyhow::Context;
 use chrono::{Datelike, NaiveDate};
 use log::{error, info};
 use slint::{ModelRc, SharedString, Timer, TimerMode, VecModel, Weak};
@@ -163,7 +165,7 @@ enum QueuedJob {
     },
     BulkFetch {
         section_ids: Vec<String>,
-        imported_urls: HashSet<String>,
+        imported_article_keys: HashSet<String>,
         max_articles: usize,
         per_section_cap: usize,
         stop_after_old: usize,
@@ -206,7 +208,7 @@ impl QueuedJob {
 enum AppEvent {
     BrowseLoaded(Result<BrowseSectionResult, String>),
     SearchLoaded(Result<Vec<ArticleSummary>, String>),
-    SavedUrlsLoaded(Result<HashSet<String>, String>),
+    SavedArticleKeysLoaded(Result<HashSet<String>, String>),
     LibraryLoaded(Result<Vec<StoredArticleMeta>, String>),
     StatsLoaded(Result<LibraryStats, String>),
     FetchProgress(FetchProgress),
@@ -274,7 +276,7 @@ struct BrowseState {
     articles: Vec<ArticleSummary>,
     report: Option<String>,
     selected: HashSet<String>,
-    saved_urls: HashSet<String>,
+    saved_article_keys: HashSet<String>,
     only_new: bool,
     date_from: String,
     date_to: String,
@@ -419,15 +421,14 @@ impl AppState {
         self.library.selected_article_id = id;
         self.library.delete_confirm_id = None;
         // Load full article text for preview (single-row lookup by PK — fast)
-        self.library.preview_article = id.and_then(|article_id| {
-            match self.db.get_article(article_id) {
+        self.library.preview_article =
+            id.and_then(|article_id| match self.db.get_article(article_id) {
                 Ok(article) => article,
                 Err(err) => {
                     log::warn!("Failed to load article #{article_id} for preview: {err:#}");
                     None
                 }
-            }
-        });
+            });
         self.dirty.library = true;
         self.dirty.preview = true;
     }
@@ -510,23 +511,39 @@ impl AppState {
 
 // ── Entry point ──
 
-pub fn run() -> Result<(), slint::PlatformError> {
+pub fn run() -> anyhow::Result<()> {
     info!("Starting GUI");
-    let window = AppWindow::new()?;
+    let window = AppWindow::new().context("failed to create the main window")?;
     window.set_browse_section_labels(ModelRc::from(Rc::new(VecModel::from(
         Vec::<SharedString>::new(),
     ))));
     window.set_bulk_section_rows(ModelRc::from(Rc::new(VecModel::from(
         Vec::<BulkSectionRow>::new(),
     ))));
-    window.set_library_rows(ModelRc::from(Rc::new(VecModel::from(Vec::<LibraryRow>::new()))));
-    window.set_browse_rows(ModelRc::from(Rc::new(VecModel::from(Vec::<BrowseRow>::new()))));
-    window.set_stat_cards(ModelRc::from(Rc::new(VecModel::from(Vec::<StatCard>::new()))));
-    window.set_activity_rows(ModelRc::from(Rc::new(VecModel::from(Vec::<ActivityRow>::new()))));
-    window.set_failed_rows(ModelRc::from(Rc::new(VecModel::from(Vec::<FailedRow>::new()))));
-    window.set_heading_labels(ModelRc::from(Rc::new(VecModel::from(Vec::<SharedString>::new()))));
-    window.set_section_labels(ModelRc::from(Rc::new(VecModel::from(Vec::<SharedString>::new()))));
-    window.set_sort_labels(ModelRc::from(Rc::new(VecModel::from(Vec::<SharedString>::new()))));
+    window.set_library_rows(ModelRc::from(Rc::new(VecModel::from(
+        Vec::<LibraryRow>::new(),
+    ))));
+    window.set_browse_rows(ModelRc::from(Rc::new(VecModel::from(
+        Vec::<BrowseRow>::new(),
+    ))));
+    window.set_stat_cards(ModelRc::from(Rc::new(VecModel::from(
+        Vec::<StatCard>::new(),
+    ))));
+    window.set_activity_rows(ModelRc::from(Rc::new(VecModel::from(
+        Vec::<ActivityRow>::new(),
+    ))));
+    window.set_failed_rows(ModelRc::from(Rc::new(VecModel::from(
+        Vec::<FailedRow>::new(),
+    ))));
+    window.set_heading_labels(ModelRc::from(Rc::new(VecModel::from(
+        Vec::<SharedString>::new(),
+    ))));
+    window.set_section_labels(ModelRc::from(Rc::new(VecModel::from(
+        Vec::<SharedString>::new(),
+    ))));
+    window.set_sort_labels(ModelRc::from(Rc::new(VecModel::from(
+        Vec::<SharedString>::new(),
+    ))));
     window.set_filter_preset_labels(ModelRc::from(Rc::new(VecModel::from(
         filter_preset_labels()
             .into_iter()
@@ -545,11 +562,11 @@ pub fn run() -> Result<(), slint::PlatformError> {
 
     let settings = SettingsStore::load_default().unwrap_or_else(|err| {
         log::warn!("Failed to load settings: {err:#}, using defaults");
-        SettingsStore::in_memory_default()
+        SettingsStore::fallback_default()
     });
-    let db = Arc::new(Database::open_default().expect("failed to open database"));
-    let scraper = Arc::new(TazClient::new().expect("failed to initialize taz client"));
-    let lingq_client = Arc::new(LingqClient::new().expect("failed to initialize LingQ client"));
+    let db = Arc::new(Database::open_default().context("failed to open database")?);
+    let scraper = Arc::new(TazClient::new().context("failed to initialize taz client")?);
+    let lingq_client = Arc::new(LingqClient::new().context("failed to initialize LingQ client")?);
     let sections = scraper.sections();
     let browse_section_index = sections
         .iter()
@@ -571,9 +588,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
     };
     let article_density = ArticleDensity::from_setting(&sd.article_density);
     let (tx, rx) = mpsc::channel();
-    let runtime = Arc::new(
-        Runtime::new().expect("failed to create tokio runtime"),
-    );
+    let runtime = Arc::new(Runtime::new().context("failed to create tokio runtime")?);
 
     let state = Rc::new(RefCell::new(AppState {
         window: window.as_weak(),
@@ -606,7 +621,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
             articles: Vec::new(),
             report: None,
             selected: HashSet::new(),
-            saved_urls: HashSet::new(),
+            saved_article_keys: HashSet::new(),
             only_new: sd.browse_only_new,
             date_from: sd.browse_date_from,
             date_to: sd.browse_date_to,
@@ -661,7 +676,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
 
     {
         let mut app = state.borrow_mut();
-        app.refresh_saved_urls();
+        app.refresh_saved_article_keys();
         app.refresh_stats();
         app.load_library();
         app.load_browse();
@@ -681,14 +696,20 @@ pub fn run() -> Result<(), slint::PlatformError> {
 
     let poll_state = state.clone();
     let timer = Timer::default();
-    timer.start(TimerMode::Repeated, std::time::Duration::from_millis(100), move || {
-        if let Ok(mut app) = poll_state.try_borrow_mut() {
-            app.poll_events();
-            app.flush_settings();
-        }
-    });
+    timer.start(
+        TimerMode::Repeated,
+        std::time::Duration::from_millis(100),
+        move || {
+            if let Ok(mut app) = poll_state.try_borrow_mut() {
+                app.poll_events();
+                app.flush_settings();
+            }
+        },
+    );
 
-    let result = window.run();
+    let result = window
+        .run()
+        .context("failed while running the UI event loop");
 
     // Signal all background tasks to stop
     if let Ok(app) = state.try_borrow() {
@@ -827,7 +848,10 @@ fn normalized_duplicate_title(title: &str) -> String {
 fn normalized_lingq_url(url: &str) -> String {
     let trimmed = url.trim();
     let without_fragment = trimmed.split('#').next().unwrap_or(trimmed);
-    let without_query = without_fragment.split('?').next().unwrap_or(without_fragment);
+    let without_query = without_fragment
+        .split('?')
+        .next()
+        .unwrap_or(without_fragment);
     without_query
         .trim_end_matches('/')
         .trim_start_matches("https://")
@@ -840,9 +864,11 @@ fn match_lingq_lessons(
     lessons: &[RemoteLesson],
     articles: &[StoredArticleMeta],
 ) -> (Vec<(i64, i64, String)>, usize) {
+    let mut by_key = std::collections::HashMap::<String, i64>::new();
     let mut by_url = std::collections::HashMap::<String, i64>::new();
     let mut by_title = std::collections::HashMap::<String, Vec<i64>>::new();
     for article in articles {
+        by_key.insert(article.article_key.clone(), article.id);
         by_url.insert(normalized_lingq_url(&article.url), article.id);
         by_title
             .entry(normalized_duplicate_title(&article.title))
@@ -854,11 +880,12 @@ fn match_lingq_lessons(
     let mut matches = Vec::new();
     let mut ambiguous = 0usize;
     for lesson in lessons {
-        let mut article_id = lesson
-            .original_url
-            .as_deref()
-            .map(normalized_lingq_url)
-            .and_then(|url| by_url.get(&url).copied());
+        let mut article_id = lesson.original_url.as_deref().and_then(|url| {
+            by_key
+                .get(&article_key_from_url(url))
+                .copied()
+                .or_else(|| by_url.get(&normalized_lingq_url(url)).copied())
+        });
 
         if article_id.is_none() {
             let title_key = normalized_duplicate_title(&lesson.title);
@@ -871,10 +898,10 @@ fn match_lingq_lessons(
             }
         }
 
-        if let Some(id) = article_id {
-            if matched_article_ids.insert(id) {
-                matches.push((id, lesson.id, lesson.lesson_url.clone()));
-            }
+        if let Some(id) = article_id
+            && matched_article_ids.insert(id)
+        {
+            matches.push((id, lesson.id, lesson.lesson_url.clone()));
         }
     }
 
@@ -1075,6 +1102,7 @@ mod tests {
     fn lingq_matching_prefers_original_url() {
         let articles = vec![StoredArticleMeta {
             id: 42,
+            article_key: "123".to_owned(),
             url: "https://taz.de/Foo/!123/?utm=abc".to_owned(),
             title: "Different title".to_owned(),
             subtitle: String::new(),
@@ -1105,6 +1133,7 @@ mod tests {
     fn lingq_matching_skips_ambiguous_titles() {
         let make_article = |id| StoredArticleMeta {
             id,
+            article_key: id.to_string(),
             url: format!("https://taz.de/a{id}/"),
             title: "Same title".to_owned(),
             subtitle: String::new(),
@@ -1130,5 +1159,38 @@ mod tests {
         let (matches, ambiguous) = match_lingq_lessons(&lessons, &articles);
         assert_eq!(matches.len(), 0);
         assert_eq!(ambiguous, 1);
+    }
+
+    #[test]
+    fn lingq_matching_uses_article_key_when_slug_changes() {
+        let articles = vec![StoredArticleMeta {
+            id: 7,
+            article_key: "6175897".to_owned(),
+            url: "https://taz.de/Sonniges-Wochenende/!6175897/".to_owned(),
+            title: "New title".to_owned(),
+            subtitle: String::new(),
+            author: String::new(),
+            date: String::new(),
+            section: String::new(),
+            word_count: 1000,
+            difficulty: 3,
+            fetched_at: String::new(),
+            uploaded_to_lingq: false,
+            lingq_lesson_id: None,
+            lingq_lesson_url: String::new(),
+            paywalled: false,
+        }];
+        let lessons = vec![RemoteLesson {
+            id: 88,
+            title: "Old title".to_owned(),
+            original_url: Some(
+                "https://www.taz.de/Alter-Slug-fuer-denselben-Artikel/!6175897/".to_owned(),
+            ),
+            lesson_url: "https://www.lingq.com/de/learn/lesson/88/".to_owned(),
+        }];
+
+        let (matches, ambiguous) = match_lingq_lessons(&lessons, &articles);
+        assert_eq!(ambiguous, 0);
+        assert_eq!(matches, vec![(7, 88, lessons[0].lesson_url.clone())]);
     }
 }

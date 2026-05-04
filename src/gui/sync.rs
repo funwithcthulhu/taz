@@ -14,8 +14,14 @@ impl AppState {
         self.bulk.per_section_cap = window.get_bulk_per_section_cap().to_string();
         self.bulk.stop_after_old = window.get_bulk_stop_after_old().to_string();
         self.library.search = window.get_library_search().to_string();
-        self.library.heading = indexed_label(&self.library.cached_heading_labels, window.get_library_heading_index());
-        self.library.section = indexed_label(&self.library.cached_section_labels, window.get_library_section_index());
+        self.library.heading = indexed_label(
+            &self.library.cached_heading_labels,
+            window.get_library_heading_index(),
+        );
+        self.library.section = indexed_label(
+            &self.library.cached_section_labels,
+            window.get_library_section_index(),
+        );
         self.library.sort_mode = LibrarySortMode::from_index(window.get_library_sort_index());
         self.library.only_not_uploaded = window.get_library_only_not_uploaded();
         self.library.min_words = window.get_library_min_words().to_string();
@@ -38,7 +44,8 @@ impl AppState {
         self.lq.selected_collection = if collection_index == 0 {
             None
         } else {
-            self.lq.collections
+            self.lq
+                .collections
                 .get(collection_index.saturating_sub(1))
                 .map(|course| course.id)
         };
@@ -86,7 +93,8 @@ impl AppState {
         s.browse_date_from.clone_from(&self.browse.date_from);
         s.browse_date_to.clone_from(&self.browse.date_to);
         s.bulk_max_articles.clone_from(&self.bulk.max_articles);
-        s.bulk_per_section_cap.clone_from(&self.bulk.per_section_cap);
+        s.bulk_per_section_cap
+            .clone_from(&self.bulk.per_section_cap);
         s.bulk_stop_after_old.clone_from(&self.bulk.stop_after_old);
         s.library_only_not_uploaded = self.library.only_not_uploaded;
         s.library_min_words.clone_from(&self.library.min_words);
@@ -148,9 +156,16 @@ impl AppState {
     }
 
     pub(super) fn filtered_browse_articles(&self) -> Vec<&ArticleSummary> {
-        self.browse.articles
+        self.browse
+            .articles
             .iter()
-            .filter(|article| !self.browse.only_new || !self.browse.saved_urls.contains(&article.url))
+            .filter(|article| {
+                !self.browse.only_new
+                    || !self
+                        .browse
+                        .saved_article_keys
+                        .contains(&article.article_key)
+            })
             .collect()
     }
 
@@ -161,30 +176,33 @@ impl AppState {
         let duplicate_titles = if self.library.duplicate_only {
             let mut counts = std::collections::HashMap::<String, usize>::new();
             for article in &self.library.articles {
-                *counts.entry(normalized_duplicate_title(&article.title)).or_default() += 1;
+                *counts
+                    .entry(normalized_duplicate_title(&article.title))
+                    .or_default() += 1;
             }
             Some(counts)
         } else {
             None
         };
 
-        self.library.articles
+        self.library
+            .articles
             .iter()
             .filter(|article| {
-                if heading != "All headings" && !heading.is_empty() {
-                    if section_heading(&article.section) != heading {
-                        return false;
-                    }
+                if heading != "All headings"
+                    && !heading.is_empty()
+                    && section_heading(&article.section) != heading
+                {
+                    return false;
                 }
-                if let Some(counts) = &duplicate_titles {
-                    if counts
+                if let Some(counts) = &duplicate_titles
+                    && counts
                         .get(&normalized_duplicate_title(&article.title))
                         .copied()
                         .unwrap_or(0)
                         < 2
-                    {
-                        return false;
-                    }
+                {
+                    return false;
                 }
                 true
             })
@@ -195,15 +213,15 @@ impl AppState {
         if self.lq.only_not_uploaded && article.uploaded_to_lingq {
             return false;
         }
-        if let Ok(Some(min_words)) = parse_optional_i64(&self.lq.min_words) {
-            if article.word_count < min_words {
-                return false;
-            }
+        if let Ok(Some(min_words)) = parse_optional_i64(&self.lq.min_words)
+            && article.word_count < min_words
+        {
+            return false;
         }
-        if let Ok(Some(max_words)) = parse_optional_i64(&self.lq.max_words) {
-            if article.word_count > max_words {
-                return false;
-            }
+        if let Ok(Some(max_words)) = parse_optional_i64(&self.lq.max_words)
+            && article.word_count > max_words
+        {
+            return false;
         }
         true
     }
@@ -214,7 +232,11 @@ impl AppState {
         };
 
         // ── Scalar properties (always synced — cheap) ──
-        window.set_page_index(if self.current_view == View::Browse { 0 } else { 1 });
+        window.set_page_index(if self.current_view == View::Browse {
+            0
+        } else {
+            1
+        });
         window.set_browse_section_index(self.browse.section_index as i32);
         window.set_browse_only_new(self.browse.only_new);
         window.set_browse_date_from(self.browse.date_from.clone().into());
@@ -272,7 +294,10 @@ impl AppState {
                     source_label: article.source_label.clone().into(),
                     url: article.url.clone().into(),
                     selected: self.browse.selected.contains(&article.url),
-                    saved: self.browse.saved_urls.contains(&article.url),
+                    saved: self
+                        .browse
+                        .saved_article_keys
+                        .contains(&article.article_key),
                 })
                 .collect::<Vec<_>>();
             window.set_browse_rows(ModelRc::from(Rc::new(VecModel::from(browse_rows))));
@@ -286,7 +311,8 @@ impl AppState {
                 self.current_section().label,
                 browse_selected,
                 self.browse.limit,
-                self.browse.report
+                self.browse
+                    .report
                     .as_ref()
                     .map(|report| format!(" {report}"))
                     .unwrap_or_default()
@@ -308,9 +334,7 @@ impl AppState {
                 .collect::<Vec<_>>();
             window.set_bulk_section_rows(ModelRc::from(Rc::new(VecModel::from(bulk_rows))));
             let bulk_count = self.bulk.selected_sections.len();
-            window.set_bulk_sections_label(
-                format!("Sections ({})", bulk_count).into(),
-            );
+            window.set_bulk_sections_label(format!("Sections ({})", bulk_count).into());
         }
 
         // ── Stats cards ──
@@ -340,10 +364,22 @@ impl AppState {
                 })
                 .unwrap_or_else(|| {
                     vec![
-                        StatCard { label: "Saved".into(), value: "–".into() },
-                        StatCard { label: "Uploaded".into(), value: "–".into() },
-                        StatCard { label: "Avg words".into(), value: "–".into() },
-                        StatCard { label: "Sections".into(), value: "–".into() },
+                        StatCard {
+                            label: "Saved".into(),
+                            value: "–".into(),
+                        },
+                        StatCard {
+                            label: "Uploaded".into(),
+                            value: "–".into(),
+                        },
+                        StatCard {
+                            label: "Avg words".into(),
+                            value: "–".into(),
+                        },
+                        StatCard {
+                            label: "Sections".into(),
+                            value: "–".into(),
+                        },
                     ]
                 });
             window.set_stat_cards(ModelRc::from(Rc::new(VecModel::from(stat_cards))));
@@ -365,17 +401,21 @@ impl AppState {
                 .into_iter()
                 .map(|density| SharedString::from(density.label()))
                 .collect::<Vec<_>>();
-            let heading_index = index_of_label(&self.library.cached_heading_labels, &self.library.heading);
-            let section_index = index_of_label(&self.library.cached_section_labels, &self.library.section);
+            let heading_index =
+                index_of_label(&self.library.cached_heading_labels, &self.library.heading);
+            let section_index =
+                index_of_label(&self.library.cached_section_labels, &self.library.section);
             window.set_heading_labels(ModelRc::from(Rc::new(VecModel::from(
-                self.library.cached_heading_labels
+                self.library
+                    .cached_heading_labels
                     .iter()
                     .cloned()
                     .map(SharedString::from)
                     .collect::<Vec<_>>(),
             ))));
             window.set_section_labels(ModelRc::from(Rc::new(VecModel::from(
-                self.library.cached_section_labels
+                self.library
+                    .cached_section_labels
                     .iter()
                     .cloned()
                     .map(SharedString::from)
@@ -482,9 +522,11 @@ impl AppState {
                 ))
             }));
             let collection_index = self
-                .lq.selected_collection
+                .lq
+                .selected_collection
                 .and_then(|selected| {
-                    self.lq.collections
+                    self.lq
+                        .collections
                         .iter()
                         .position(|collection| collection.id == selected)
                 })
@@ -513,10 +555,7 @@ impl AppState {
                         .current_job_started_at
                         .map(|started| started.elapsed().as_secs())
                         .unwrap_or(0);
-                    format!(
-                        "{} ({} / {}, {}s)",
-                        p.label, p.completed, p.total, elapsed
-                    )
+                    format!("{} ({} / {}, {}s)", p.label, p.completed, p.total, elapsed)
                 })
                 .unwrap_or_default()
                 .into(),

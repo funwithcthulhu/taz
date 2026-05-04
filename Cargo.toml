@@ -1,13 +1,19 @@
 [package]
-name = "taz_lingq_tool"
+name = "taz-reader"
 version = "1.2.0"
 edition = "2024"
 build = "build.rs"
+publish = false
+description = "Windows desktop app for browsing taz.de, keeping a local library, and uploading articles to LingQ."
+readme = "README.md"
+repository = "https://github.com/funwithcthulhu/taz-reader"
+homepage = "https://github.com/funwithcthulhu/taz-reader"
+keywords = ["taz", "lingq", "desktop", "slint", "sqlite"]
+categories = ["gui", "text-processing"]
 
 [dependencies]
 anyhow = "1.0"
 chrono = { version = "0.4", default-features = false, features = ["alloc", "std", "clock"] }
-clap = { version = "4.5", features = ["derive"] }
 dirs = "6.0"
 env_logger = "0.11"
 log = "0.4"

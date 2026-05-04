@@ -4,7 +4,11 @@ pub(super) fn wire_callbacks(window: &AppWindow, state: &Rc<RefCell<AppState>>) 
     let state_clone = state.clone();
     window.on_switch_page(move |index| {
         let mut app = state_clone.borrow_mut();
-        app.current_view = if index == 0 { View::Browse } else { View::Library };
+        app.current_view = if index == 0 {
+            View::Browse
+        } else {
+            View::Library
+        };
         app.dirty = DirtyFlags::all();
         app.save_settings();
         app.sync_to_window();
@@ -59,10 +63,14 @@ pub(super) fn wire_callbacks(window: &AppWindow, state: &Rc<RefCell<AppState>>) 
     let state_clone = state.clone();
     window.on_browse_toggle_article(move |index| {
         let mut app = state_clone.borrow_mut();
-        if let Some(url) = app.browse.articles.get(index as usize).map(|article| article.url.clone()) {
-            if !app.browse.selected.insert(url.clone()) {
-                app.browse.selected.remove(&url);
-            }
+        if let Some(url) = app
+            .browse
+            .articles
+            .get(index as usize)
+            .map(|article| article.url.clone())
+            && !app.browse.selected.insert(url.clone())
+        {
+            app.browse.selected.remove(&url);
         }
         app.dirty.browse = true;
         app.sync_to_window();
@@ -107,10 +115,10 @@ pub(super) fn wire_callbacks(window: &AppWindow, state: &Rc<RefCell<AppState>>) 
     let state_clone = state.clone();
     window.on_browse_toggle_bulk_section(move |index| {
         let mut app = state_clone.borrow_mut();
-        if let Some(section) = app.sections.get(index as usize) {
-            if !app.bulk.selected_sections.insert(section.id.to_owned()) {
-                app.bulk.selected_sections.remove(section.id);
-            }
+        if let Some(section) = app.sections.get(index as usize)
+            && !app.bulk.selected_sections.insert(section.id.to_owned())
+        {
+            app.bulk.selected_sections.remove(section.id);
         }
         app.dirty.browse = true;
         app.sync_to_window();
@@ -215,7 +223,10 @@ pub(super) fn wire_callbacks(window: &AppWindow, state: &Rc<RefCell<AppState>>) 
     let state_clone = state.clone();
     window.on_library_select_article(move |index| {
         let mut app = state_clone.borrow_mut();
-        let id = app.filtered_library_articles().get(index as usize).map(|a| a.id);
+        let id = app
+            .filtered_library_articles()
+            .get(index as usize)
+            .map(|a| a.id);
         app.select_article(id);
         app.sync_to_window();
     });
@@ -233,7 +244,7 @@ pub(super) fn wire_callbacks(window: &AppWindow, state: &Rc<RefCell<AppState>>) 
                     if app.library.selected_article_id == Some(article_id) {
                         app.library.selected_article_id = None;
                     }
-                    app.refresh_saved_urls();
+                    app.refresh_saved_article_keys();
                     app.refresh_stats();
                     app.load_library();
                     app.set_status("Deleted article from the local library.");
@@ -386,10 +397,7 @@ pub(super) fn wire_callbacks(window: &AppWindow, state: &Rc<RefCell<AppState>>) 
             2 => (today - chrono::Duration::days(90), today),
             3 => {
                 let year = today.year();
-                (
-                    NaiveDate::from_ymd_opt(year, 1, 1).unwrap_or(today),
-                    today,
-                )
+                (NaiveDate::from_ymd_opt(year, 1, 1).unwrap_or(today), today)
             }
             4 => {
                 let year = today.year() - 1;
@@ -450,7 +458,8 @@ pub(super) fn wire_callbacks(window: &AppWindow, state: &Rc<RefCell<AppState>>) 
             return;
         }
         let current_pos = app
-            .library.selected_article_id
+            .library
+            .selected_article_id
             .and_then(|id| filtered.iter().position(|a| a.id == id));
         let new_pos = match current_pos {
             Some(0) | None => 0,
@@ -474,7 +483,8 @@ pub(super) fn wire_callbacks(window: &AppWindow, state: &Rc<RefCell<AppState>>) 
         }
         let last = filtered.len() - 1;
         let current_pos = app
-            .library.selected_article_id
+            .library
+            .selected_article_id
             .and_then(|id| filtered.iter().position(|a| a.id == id));
         let new_pos = match current_pos {
             Some(pos) if pos < last => pos + 1,

@@ -40,7 +40,10 @@ fn compact_url_label(url: &str) -> String {
 impl AppState {
     pub(super) fn load_browse(&mut self) {
         self.save_settings();
-        self.set_status(format!("Loading {} from taz...", self.current_section().label));
+        self.set_status(format!(
+            "Loading {} from taz...",
+            self.current_section().label
+        ));
         let section_id = self.current_section().id.to_owned();
         let limit = self.browse.limit;
         let scraper = self.scraper.clone();
@@ -79,11 +82,11 @@ impl AppState {
                 return;
             }
         };
-        if let (Some(from), Some(to)) = (date_from, date_to) {
-            if from > to {
-                self.set_status("From date must be on or before To date.");
-                return;
-            }
+        if let (Some(from), Some(to)) = (date_from, date_to)
+            && from > to
+        {
+            self.set_status("From date must be on or before To date.");
+            return;
         }
 
         let date_label = search_date_label(date_from, date_to);
@@ -141,14 +144,14 @@ impl AppState {
         });
     }
 
-    pub(super) fn refresh_saved_urls(&mut self) {
+    pub(super) fn refresh_saved_article_keys(&mut self) {
         let db = self.db.clone();
         self.spawn_background(async move {
-            let result = tokio::task::spawn_blocking(move || {
-                db.get_all_article_urls()
-            }).await.unwrap_or_else(|err| Err(anyhow::anyhow!("{err}")))
-            .map_err(|err| format!("{err:#}"));
-            AppEvent::SavedUrlsLoaded(result)
+            let result = tokio::task::spawn_blocking(move || db.get_all_article_keys())
+                .await
+                .unwrap_or_else(|err| Err(anyhow::anyhow!("{err}")))
+                .map_err(|err| format!("{err:#}"));
+            AppEvent::SavedArticleKeysLoaded(result)
         });
     }
 
@@ -156,10 +159,10 @@ impl AppState {
         let db = self.db.clone();
         let query = self.build_library_query();
         self.spawn_background(async move {
-            let result = tokio::task::spawn_blocking(move || {
-                db.list_articles_meta(&query)
-            }).await.unwrap_or_else(|err| Err(anyhow::anyhow!("{err}")))
-            .map_err(|err| format!("{err:#}"));
+            let result = tokio::task::spawn_blocking(move || db.list_articles_meta(&query))
+                .await
+                .unwrap_or_else(|err| Err(anyhow::anyhow!("{err}")))
+                .map_err(|err| format!("{err:#}"));
             AppEvent::LibraryLoaded(result)
         });
     }
@@ -167,19 +170,30 @@ impl AppState {
     fn build_library_query(&self) -> ArticleQuery {
         let search = {
             let s = self.library.search.trim();
-            if s.is_empty() { None } else { Some(s.to_owned()) }
+            if s.is_empty() {
+                None
+            } else {
+                Some(s.to_owned())
+            }
         };
         let section = {
             let s = self.library.section.trim();
-            if s.is_empty() || s == "All sections" { None } else { Some(s.to_owned()) }
+            if s.is_empty() || s == "All sections" {
+                None
+            } else {
+                Some(s.to_owned())
+            }
         };
-        let sort = Some(match self.library.sort_mode {
-            LibrarySortMode::Newest => "newest",
-            LibrarySortMode::Oldest => "oldest",
-            LibrarySortMode::Longest => "longest",
-            LibrarySortMode::Shortest => "shortest",
-            LibrarySortMode::Title => "title",
-        }.to_owned());
+        let sort = Some(
+            match self.library.sort_mode {
+                LibrarySortMode::Newest => "newest",
+                LibrarySortMode::Oldest => "oldest",
+                LibrarySortMode::Longest => "longest",
+                LibrarySortMode::Shortest => "shortest",
+                LibrarySortMode::Title => "title",
+            }
+            .to_owned(),
+        );
 
         ArticleQuery {
             search,
@@ -195,10 +209,10 @@ impl AppState {
     pub(super) fn refresh_stats(&mut self) {
         let db = self.db.clone();
         self.spawn_background(async move {
-            let result = tokio::task::spawn_blocking(move || {
-                db.get_stats()
-            }).await.unwrap_or_else(|err| Err(anyhow::anyhow!("{err}")))
-            .map_err(|err| format!("{err:#}"));
+            let result = tokio::task::spawn_blocking(move || db.get_stats())
+                .await
+                .unwrap_or_else(|err| Err(anyhow::anyhow!("{err}")))
+                .map_err(|err| format!("{err:#}"));
             AppEvent::StatsLoaded(result)
         });
     }
@@ -222,7 +236,10 @@ impl AppState {
         let language = self.lq.language.clone();
         let lingq = self.lingq.clone();
         self.spawn_background(async move {
-            let result = lingq.get_collections(&api_key, &language).await.map_err(|err| format!("{err:#}"));
+            let result = lingq
+                .get_collections(&api_key, &language)
+                .await
+                .map_err(|err| format!("{err:#}"));
             AppEvent::CollectionsLoaded(result)
         });
     }
@@ -236,7 +253,7 @@ impl AppState {
         if let Some(until) = self.lq.login_cooldown_until {
             if std::time::Instant::now() < until {
                 let secs = until.duration_since(std::time::Instant::now()).as_secs();
-                self.set_status(&format!(
+                self.set_status(format!(
                     "Too many failed login attempts. Try again in {secs}s."
                 ));
                 return;
@@ -303,7 +320,7 @@ impl AppState {
             QueuedJob::SaveUrls { urls, label } => self.start_save_job(urls, &label),
             QueuedJob::BulkFetch {
                 section_ids,
-                imported_urls,
+                imported_article_keys,
                 max_articles,
                 per_section_cap,
                 stop_after_old,
@@ -311,7 +328,7 @@ impl AppState {
                 date_to,
             } => self.start_bulk_fetch_job(
                 section_ids,
-                imported_urls,
+                imported_article_keys,
                 max_articles,
                 per_section_cap,
                 stop_after_old,
@@ -364,10 +381,10 @@ impl AppState {
                         }
                         break;
                     }
-                    if index > 0 {
-                        if cancelable_sleep(cancel.clone(), REQUEST_THROTTLE).await {
-                            break;
-                        }
+                    if index > 0
+                        && cancelable_sleep(cancel.clone(), REQUEST_THROTTLE).await
+                    {
+                        break;
                     }
                     let _ = tx.send(AppEvent::SaveProgress(FetchProgress {
                         label: format!("Saving {}", compact_url_label(&url)),
@@ -506,11 +523,16 @@ impl AppState {
             return;
         }
 
-        let section_ids = self.bulk.selected_sections.iter().cloned().collect::<Vec<_>>();
-        let imported_urls = self.browse.saved_urls.clone();
+        let section_ids = self
+            .bulk
+            .selected_sections
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let imported_article_keys = self.browse.saved_article_keys.clone();
         self.enqueue_job(QueuedJob::BulkFetch {
             section_ids,
-            imported_urls,
+            imported_article_keys,
             max_articles,
             per_section_cap,
             stop_after_old,
@@ -519,10 +541,11 @@ impl AppState {
         });
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn start_bulk_fetch_job(
         &mut self,
         section_ids: Vec<String>,
-        imported_urls: HashSet<String>,
+        imported_article_keys: HashSet<String>,
         max_articles: usize,
         per_section_cap: usize,
         stop_after_old: usize,
@@ -599,7 +622,7 @@ impl AppState {
                         if saved >= max_articles || accepted_for_section >= per_section_cap {
                             break;
                         }
-                        if imported_urls.contains(&summary.url) {
+                        if imported_article_keys.contains(&summary.article_key) {
                             skipped_existing += 1;
                             continue;
                         }
@@ -707,7 +730,7 @@ impl AppState {
         let two_days_ago = today - chrono::Duration::days(2);
 
         let section_ids: Vec<String> = self.sections.iter().map(|s| s.id.to_owned()).collect();
-        let imported_urls = self.browse.saved_urls.clone();
+        let imported_article_keys = self.browse.saved_article_keys.clone();
         let max_articles: usize = 30;
         let per_section_cap: usize = 5;
         let stop_after_old: usize = 8;
@@ -780,7 +803,7 @@ impl AppState {
                         if saved >= max_articles || accepted_for_section >= per_section_cap {
                             break;
                         }
-                        if imported_urls.contains(&summary.url) {
+                        if imported_article_keys.contains(&summary.article_key) {
                             skipped_existing += 1;
                             continue;
                         }
@@ -915,7 +938,7 @@ impl AppState {
                 self.set_status(format!(
                     "Deleted {deleted} of {count} visible selected article(s).{hidden_suffix}"
                 ));
-                self.refresh_saved_urls();
+                self.refresh_saved_article_keys();
                 self.refresh_stats();
                 self.load_library();
             }
@@ -1097,11 +1120,12 @@ impl AppState {
         if !upload_ids.is_empty() {
             if self.lq.api_key.trim().is_empty() {
                 self.set_status("Open LingQ settings and save a token before retrying uploads.");
-                self.failed_items.extend(upload_ids.into_iter().map(|id| JobFailure {
-                    label: format!("article #{id}"),
-                    detail: "LingQ token missing during retry.".to_owned(),
-                    retry: Some(RetryAction::UploadArticle(id)),
-                }));
+                self.failed_items
+                    .extend(upload_ids.into_iter().map(|id| JobFailure {
+                        label: format!("article #{id}"),
+                        detail: "LingQ token missing during retry.".to_owned(),
+                        retry: Some(RetryAction::UploadArticle(id)),
+                    }));
                 self.dirty.activity = true;
                 self.sync_to_window();
                 return;
@@ -1117,14 +1141,22 @@ impl AppState {
             });
         }
 
-        self.add_activity("queued", "Retry requested", format!("{queued} item(s) queued."));
+        self.add_activity(
+            "queued",
+            "Retry requested",
+            format!("{queued} item(s) queued."),
+        );
         self.set_status(format!("Queued {queued} failed item(s) for retry."));
     }
 
     pub(super) fn clear_failed_items(&mut self) {
         let cleared = self.failed_items.len();
         self.failed_items.clear();
-        self.add_activity("cleared", "Cleared retry list", format!("{cleared} item(s) removed."));
+        self.add_activity(
+            "cleared",
+            "Cleared retry list",
+            format!("{cleared} item(s) removed."),
+        );
         self.set_status("Cleared the retry list.");
     }
 
@@ -1168,12 +1200,11 @@ impl AppState {
                         }
                         break;
                     }
-                    if index > 0 {
-                        if cancelable_sleep(cancel.clone(), REQUEST_THROTTLE).await {
-                            break;
-                        }
+                    if index > 0 && cancelable_sleep(cancel.clone(), REQUEST_THROTTLE).await {
+                        break;
                     }
-                    let Some(article) = db.get_article(id).map_err(|err| format!("{err:#}"))? else {
+                    let Some(article) = db.get_article(id).map_err(|err| format!("{err:#}"))?
+                    else {
                         failed.push(JobFailure {
                             label: format!("article #{id}"),
                             detail: "not found".to_owned(),
@@ -1213,9 +1244,11 @@ impl AppState {
                                 // Re-upload: lesson was updated, not newly created
                                 skipped_already += 1;
                             }
-                            if let Err(err) =
-                                db.mark_uploaded(article.id, response.lesson_id, &response.lesson_url)
-                            {
+                            if let Err(err) = db.mark_uploaded(
+                                article.id,
+                                response.lesson_id,
+                                &response.lesson_url,
+                            ) {
                                 failed.push(JobFailure {
                                     label: article.title,
                                     detail: format!("uploaded but DB update failed: {err}"),
@@ -1344,13 +1377,15 @@ impl AppState {
             .await;
 
             let event = match result {
-                Ok((scanned, matched, ambiguous, failed, cancelled)) => AppEvent::LingqCourseSynced {
-                    scanned,
-                    matched,
-                    ambiguous,
-                    failed,
-                    cancelled,
-                },
+                Ok((scanned, matched, ambiguous, failed, cancelled)) => {
+                    AppEvent::LingqCourseSynced {
+                        scanned,
+                        matched,
+                        ambiguous,
+                        failed,
+                        cancelled,
+                    }
+                }
                 Err(err) => AppEvent::LingqCourseSynced {
                     scanned: 0,
                     matched: 0,
@@ -1402,14 +1437,12 @@ impl AppState {
                         self.browse.articles = articles;
                         self.browse.report = Some(format!(
                             "Search results for \"{}\"{}.",
-                            self.browse.search_query,
-                            date_label
+                            self.browse.search_query, date_label
                         ));
                         self.dirty.browse = true;
                         self.set_status(format!(
                             "Found {count} articles for \"{}\"{}.",
-                            self.browse.search_query,
-                            date_label
+                            self.browse.search_query, date_label
                         ));
                     }
                     Err(err) => {
@@ -1417,9 +1450,9 @@ impl AppState {
                         self.set_status(format!("Search failed: {err}"));
                     }
                 },
-                AppEvent::SavedUrlsLoaded(result) => match result {
-                    Ok(urls) => {
-                        self.browse.saved_urls = urls;
+                AppEvent::SavedArticleKeysLoaded(result) => match result {
+                    Ok(keys) => {
+                        self.browse.saved_article_keys = keys;
                         self.dirty.browse = true;
                         self.sync_to_window();
                     }
@@ -1459,7 +1492,7 @@ impl AppState {
                     self.record_failures(&failed);
                     self.add_activity("finished", "Fetch job finished", &message);
                     self.set_status(format!("{message}{}", format_failure_suffix(&failed)));
-                    self.refresh_saved_urls();
+                    self.refresh_saved_article_keys();
                     self.refresh_stats();
                     self.load_library();
                     self.load_browse();
@@ -1479,7 +1512,7 @@ impl AppState {
                     self.set_status(format!("{message}{}", format_failure_suffix(&failed)));
                     self.browse.selected.clear();
                     self.dirty.browse = true;
-                    self.refresh_saved_urls();
+                    self.refresh_saved_article_keys();
                     self.refresh_stats();
                     self.load_library();
                     self.start_next_job_if_idle();
@@ -1516,7 +1549,7 @@ impl AppState {
                             );
                             self.lq.login_cooldown_until =
                                 Some(std::time::Instant::now() + cooldown);
-                            self.set_status(&format!(
+                            self.set_status(format!(
                                 "{err} (Cooldown: {cooldown:.0?} before next attempt)"
                             ));
                         } else {
@@ -1524,7 +1557,12 @@ impl AppState {
                         }
                     }
                 },
-                AppEvent::UploadFinished { uploaded, skipped_already, failed, cancelled } => {
+                AppEvent::UploadFinished {
+                    uploaded,
+                    skipped_already,
+                    failed,
+                    cancelled,
+                } => {
                     self.clear_current_job();
                     self.progress = None;
                     self.cancel_flag.store(false, Ordering::Relaxed);

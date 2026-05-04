@@ -1,22 +1,12 @@
-use crate::taz::Article;
+use crate::{identity::article_key_from_url, taz::Article};
 use anyhow::{Context, Result};
 use log::{debug, info};
 use rusqlite::{Connection, OptionalExtension, params};
-use std::{
-    collections::HashSet,
-    path::Path,
-    sync::Mutex,
-};
+use std::{collections::HashSet, path::Path, sync::Mutex};
 
-/// ── SQL column list constants ────────────────────────────────────────────────
-/// Centralised here so SELECT and INSERT columns stay in sync across queries.
-
-/// Columns inserted when saving an article (excludes auto-generated id, uploaded fields).
-const INSERT_COLS: &str =
-    "url, title, subtitle, author, date, section, clean_text, word_count, difficulty, fetched_at, paywalled";
-
-/// ON CONFLICT UPDATE clause shared by save_article and save_articles_batch.
+const INSERT_COLS: &str = "article_key, url, title, subtitle, author, date, section, clean_text, word_count, difficulty, fetched_at, paywalled";
 const UPSERT_SET: &str = r#"
+    url = excluded.url,
     title = excluded.title,
     subtitle = excluded.subtitle,
     author = excluded.author,
@@ -28,26 +18,15 @@ const UPSERT_SET: &str = r#"
     fetched_at = excluded.fetched_at,
     paywalled = excluded.paywalled
 "#;
-
-/// All columns for a full StoredArticle row (unqualified — for single-table queries).
-const SELECT_ALL_COLS: &str =
-    "id, url, title, subtitle, author, date, section, clean_text, word_count, difficulty, fetched_at, uploaded_to_lingq, lingq_lesson_id, lingq_lesson_url, paywalled";
-
-/// All columns for a full StoredArticle row (table-qualified — for JOIN queries).
-const SELECT_ALL_COLS_A: &str =
-    "a.id, a.url, a.title, a.subtitle, a.author, a.date, a.section, a.clean_text, a.word_count, a.difficulty, a.fetched_at, a.uploaded_to_lingq, a.lingq_lesson_id, a.lingq_lesson_url, a.paywalled";
-
-/// Metadata-only columns for StoredArticleMeta (no clean_text).
-const SELECT_META_COLS: &str =
-    "id, url, title, subtitle, author, date, section, word_count, difficulty, fetched_at, uploaded_to_lingq, lingq_lesson_id, lingq_lesson_url, paywalled";
-
-/// Metadata-only columns (table-qualified — for JOIN queries).
-const SELECT_META_COLS_A: &str =
-    "a.id, a.url, a.title, a.subtitle, a.author, a.date, a.section, a.word_count, a.difficulty, a.fetched_at, a.uploaded_to_lingq, a.lingq_lesson_id, a.lingq_lesson_url, a.paywalled";
+const SELECT_ALL_COLS: &str = "id, article_key, url, title, subtitle, author, date, section, clean_text, word_count, difficulty, fetched_at, uploaded_to_lingq, lingq_lesson_id, lingq_lesson_url, paywalled";
+const SELECT_ALL_COLS_A: &str = "a.id, a.article_key, a.url, a.title, a.subtitle, a.author, a.date, a.section, a.clean_text, a.word_count, a.difficulty, a.fetched_at, a.uploaded_to_lingq, a.lingq_lesson_id, a.lingq_lesson_url, a.paywalled";
+const SELECT_META_COLS: &str = "id, article_key, url, title, subtitle, author, date, section, word_count, difficulty, fetched_at, uploaded_to_lingq, lingq_lesson_id, lingq_lesson_url, paywalled";
+const SELECT_META_COLS_A: &str = "a.id, a.article_key, a.url, a.title, a.subtitle, a.author, a.date, a.section, a.word_count, a.difficulty, a.fetched_at, a.uploaded_to_lingq, a.lingq_lesson_id, a.lingq_lesson_url, a.paywalled";
 
 #[derive(Debug, Clone)]
 pub struct StoredArticle {
     pub id: i64,
+    pub article_key: String,
     pub url: String,
     pub title: String,
     pub subtitle: String,
@@ -69,6 +48,7 @@ pub struct StoredArticle {
 #[derive(Debug, Clone)]
 pub struct StoredArticleMeta {
     pub id: i64,
+    pub article_key: String,
     pub url: String,
     pub title: String,
     pub subtitle: String,
@@ -119,7 +99,7 @@ pub struct Database {
 
 impl Database {
     pub fn open_default() -> Result<Self> {
-        let db_path = crate::app_data_dir()?.join("taz_lingq_tool.db");
+        let db_path = crate::app_database_path()?;
         Self::open(&db_path)
     }
 
@@ -164,35 +144,63 @@ impl Database {
         Ok(database)
     }
 
-    /// Acquire the write connection.
     fn conn(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
-        self.write_conn
-            .lock()
-            .map_err(|_| anyhow::anyhow!("database write mutex poisoned — a background thread likely panicked"))
+        self.write_conn.lock().map_err(|_| {
+            anyhow::anyhow!("database write mutex poisoned — a background thread likely panicked")
+        })
     }
 
-    /// Acquire the read-only connection (does not block writers).
     fn read(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
-        self.read_conn
-            .lock()
-            .map_err(|_| anyhow::anyhow!("database read mutex poisoned — a background thread likely panicked"))
+        self.read_conn.lock().map_err(|_| {
+            anyhow::anyhow!("database read mutex poisoned — a background thread likely panicked")
+        })
     }
 
-    fn restore_lingq_link_for_url(&self, conn: &Connection, url: &str) -> Result<()> {
+    fn restore_lingq_link_for_article(&self, conn: &Connection, article: &Article) -> Result<()> {
         conn.execute(
             "UPDATE articles
              SET uploaded_to_lingq = 1,
-                 lingq_lesson_id = (
-                     SELECT lesson_id FROM lingq_links WHERE article_url = ?1
+                 lingq_lesson_id = COALESCE(
+                     (
+                         SELECT lesson_id
+                         FROM lingq_links
+                         WHERE article_key = ?1
+                           AND lesson_id IS NOT NULL
+                         ORDER BY updated_at DESC, rowid DESC
+                         LIMIT 1
+                     ),
+                     (
+                         SELECT lesson_id
+                         FROM lingq_links
+                         WHERE article_url = ?2
+                           AND lesson_id IS NOT NULL
+                         ORDER BY updated_at DESC, rowid DESC
+                         LIMIT 1
+                     )
                  ),
                  lingq_lesson_url = COALESCE((
-                     SELECT lesson_url FROM lingq_links WHERE article_url = ?1
+                     SELECT lesson_url
+                     FROM lingq_links
+                     WHERE article_key = ?1
+                       AND lesson_url != ''
+                     ORDER BY updated_at DESC, rowid DESC
+                     LIMIT 1
+                 ), (
+                     SELECT lesson_url
+                     FROM lingq_links
+                     WHERE article_url = ?2
+                       AND lesson_url != ''
+                     ORDER BY updated_at DESC, rowid DESC
+                     LIMIT 1
                  ), '')
-             WHERE url = ?1
+             WHERE article_key = ?1
                AND EXISTS (
-                   SELECT 1 FROM lingq_links WHERE article_url = ?1
+                   SELECT 1
+                   FROM lingq_links
+                   WHERE article_key = ?1
+                      OR article_url = ?2
                )",
-            params![url],
+            params![article.article_key, article.url],
         )?;
         Ok(())
     }
@@ -204,13 +212,14 @@ impl Database {
         // whether the row was inserted or updated via ON CONFLICT.
         let sql = format!(
             "INSERT INTO articles ({INSERT_COLS})
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
-             ON CONFLICT(url) DO UPDATE SET {UPSERT_SET}
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             ON CONFLICT(article_key) DO UPDATE SET {UPSERT_SET}
              RETURNING id"
         );
         let id: i64 = conn.query_row(
             &sql,
             params![
+                article.article_key,
                 article.url,
                 article.title,
                 article.subtitle,
@@ -226,7 +235,7 @@ impl Database {
             |row| row.get(0),
         )?;
 
-        self.restore_lingq_link_for_url(&conn, &article.url)?;
+        self.restore_lingq_link_for_article(&conn, article)?;
 
         Ok(id)
     }
@@ -234,19 +243,20 @@ impl Database {
     /// Save multiple articles in a single transaction for better performance.
     /// Returns the number of articles successfully saved.
     pub fn save_articles_batch(&self, articles: &[Article]) -> Result<usize> {
-        let conn = self.conn()?;
-        conn.execute_batch("BEGIN")?;
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
         let sql = format!(
             "INSERT INTO articles ({INSERT_COLS})
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
-             ON CONFLICT(url) DO UPDATE SET {UPSERT_SET}"
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             ON CONFLICT(article_key) DO UPDATE SET {UPSERT_SET}"
         );
         let mut saved = 0;
         for article in articles {
             debug!("Batch saving: {} ({})", article.title, article.url);
-            match conn.execute(
+            match tx.execute(
                 &sql,
                 params![
+                    article.article_key,
                     article.url,
                     article.title,
                     article.subtitle,
@@ -262,24 +272,18 @@ impl Database {
             ) {
                 Ok(_) => {
                     saved += 1;
-                    if let Err(err) = self.restore_lingq_link_for_url(&conn, &article.url) {
+                    if let Err(err) = self.restore_lingq_link_for_article(&tx, article) {
                         log::warn!("Failed to restore LingQ link for {}: {err:#}", article.url);
                     }
                 }
                 Err(err) => log::warn!("Batch save failed for {}: {err:#}", article.url),
             }
         }
-        if let Err(err) = conn.execute_batch("COMMIT") {
-            let _ = conn.execute_batch("ROLLBACK");
-            return Err(err.into());
-        }
+        tx.commit()?;
         Ok(saved)
     }
 
-    pub fn list_articles(
-        &self,
-        query: &ArticleQuery,
-    ) -> Result<Vec<StoredArticle>> {
+    pub fn list_articles(&self, query: &ArticleQuery) -> Result<Vec<StoredArticle>> {
         let order_clause = match query.sort.as_deref() {
             Some("oldest") => "date ASC, id ASC",
             Some("longest") => "word_count DESC",
@@ -290,7 +294,7 @@ impl Database {
 
         // Use FTS5 MATCH when search term is provided; fall back to LIKE for
         // terms that contain FTS special characters that might trip up the parser.
-        let fts_term = query.search.as_deref().map(|s| sanitize_fts_query(s));
+        let fts_term = query.search.as_deref().map(sanitize_fts_query);
         let use_fts = fts_term.as_ref().is_some_and(|t| !t.is_empty());
 
         let sql = if use_fts {
@@ -345,10 +349,7 @@ impl Database {
     }
 
     /// List articles returning only metadata (no clean_text) for list display.
-    pub fn list_articles_meta(
-        &self,
-        query: &ArticleQuery,
-    ) -> Result<Vec<StoredArticleMeta>> {
+    pub fn list_articles_meta(&self, query: &ArticleQuery) -> Result<Vec<StoredArticleMeta>> {
         let order_clause = match query.sort.as_deref() {
             Some("oldest") => "date ASC, id ASC",
             Some("longest") => "word_count DESC",
@@ -357,7 +358,7 @@ impl Database {
             _ => "date DESC, id DESC",
         };
 
-        let fts_term = query.search.as_deref().map(|s| sanitize_fts_query(s));
+        let fts_term = query.search.as_deref().map(sanitize_fts_query);
         let use_fts = fts_term.as_ref().is_some_and(|t| !t.is_empty());
 
         let sql = if use_fts {
@@ -422,33 +423,34 @@ impl Database {
             .map_err(Into::into)
     }
 
-    pub fn get_all_article_urls(&self) -> Result<HashSet<String>> {
+    pub fn get_all_article_keys(&self) -> Result<HashSet<String>> {
         let conn = self.read()?;
-        let mut stmt = conn.prepare("SELECT url FROM articles")?;
+        let mut stmt = conn.prepare("SELECT article_key FROM articles")?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-        let urls = rows.collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(urls.into_iter().collect())
+        let keys = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(keys.into_iter().collect())
     }
 
     pub fn mark_uploaded(&self, id: i64, lesson_id: i64, lesson_url: &str) -> Result<()> {
         let conn = self.conn()?;
-        let article_url: String = conn.query_row(
-            "SELECT url FROM articles WHERE id = ?1",
+        let (article_url, article_key): (String, String) = conn.query_row(
+            "SELECT url, article_key FROM articles WHERE id = ?1",
             params![id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         conn.execute(
             "UPDATE articles SET uploaded_to_lingq = 1, lingq_lesson_id = ?1, lingq_lesson_url = ?2 WHERE id = ?3",
             params![lesson_id, lesson_url, id],
         )?;
         conn.execute(
-            "INSERT INTO lingq_links (article_url, lesson_id, lesson_url)
-             VALUES (?1, ?2, ?3)
+            "INSERT INTO lingq_links (article_url, article_key, lesson_id, lesson_url)
+             VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(article_url) DO UPDATE SET
+                 article_key = excluded.article_key,
                  lesson_id = excluded.lesson_id,
                  lesson_url = excluded.lesson_url,
                  updated_at = CURRENT_TIMESTAMP",
-            params![article_url, lesson_id, lesson_url],
+            params![article_url, article_key, lesson_id, lesson_url],
         )?;
         Ok(())
     }
@@ -468,24 +470,22 @@ impl Database {
         if ids.is_empty() {
             return Ok(0);
         }
-        let conn = self.conn()?;
-        conn.execute_batch("BEGIN")?;
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
         let mut deleted = 0usize;
         for id in ids {
-            conn.execute("DELETE FROM articles WHERE id = ?1", params![id])?;
-            deleted += conn.changes() as usize;
+            tx.execute("DELETE FROM articles WHERE id = ?1", params![id])?;
+            deleted += tx.changes() as usize;
         }
-        conn.execute_batch("COMMIT")?;
+        tx.commit()?;
         Ok(deleted)
     }
 
     /// Run PRAGMA integrity_check and return the result string.
     pub fn integrity_check(&self) -> Result<String> {
-        let result: String = self.read()?.query_row(
-            "PRAGMA integrity_check",
-            [],
-            |row| row.get(0),
-        )?;
+        let result: String = self
+            .read()?
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
         Ok(result)
     }
 
@@ -505,7 +505,9 @@ impl Database {
             .query_map([], map_article_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
-        let mut csv = String::from("id,url,title,subtitle,author,date,section,word_count,difficulty,fetched_at,uploaded_to_lingq,lingq_lesson_id,lingq_lesson_url\n");
+        let mut csv = String::from(
+            "id,url,title,subtitle,author,date,section,word_count,difficulty,fetched_at,uploaded_to_lingq,lingq_lesson_id,lingq_lesson_url\n",
+        );
         for a in &articles {
             csv.push_str(&format!(
                 "{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
@@ -520,7 +522,9 @@ impl Database {
                 a.difficulty,
                 csv_escape(&a.fetched_at),
                 a.uploaded_to_lingq,
-                a.lingq_lesson_id.map(|id| id.to_string()).unwrap_or_default(),
+                a.lingq_lesson_id
+                    .map(|id| id.to_string())
+                    .unwrap_or_default(),
                 csv_escape(&a.lingq_lesson_url),
             ));
         }
@@ -594,7 +598,7 @@ impl Database {
     }
 
     fn migrate(&self) -> Result<()> {
-        let conn = self.conn()?;
+        let mut conn = self.conn()?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);",
         )?;
@@ -872,39 +876,168 @@ impl Database {
             )?;
         }
 
+        if current_version < 9 {
+            self.migrate_article_keys(&mut conn)?;
+        }
+
         Ok(())
     }
+
+    fn migrate_article_keys(&self, conn: &mut Connection) -> Result<()> {
+        let tx = conn.transaction()?;
+        if !column_exists(&tx, "articles", "article_key")? {
+            tx.execute(
+                "ALTER TABLE articles ADD COLUMN article_key TEXT NOT NULL DEFAULT ''",
+                [],
+            )?;
+        }
+        if !column_exists(&tx, "lingq_links", "article_key")? {
+            tx.execute(
+                "ALTER TABLE lingq_links ADD COLUMN article_key TEXT NOT NULL DEFAULT ''",
+                [],
+            )?;
+        }
+
+        let mut articles = tx
+            .prepare(&format!(
+                "SELECT {SELECT_ALL_COLS} FROM articles ORDER BY id ASC"
+            ))?
+            .query_map([], map_article_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        for article in &mut articles {
+            let article_key = article_key_from_url(&article.url);
+            article.article_key = article_key.clone();
+            tx.execute(
+                "UPDATE articles SET article_key = ?1 WHERE id = ?2",
+                params![article_key, article.id],
+            )?;
+        }
+
+        let link_rows = tx
+            .prepare("SELECT article_url FROM lingq_links")?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for article_url in link_rows {
+            tx.execute(
+                "UPDATE lingq_links SET article_key = ?1 WHERE article_url = ?2",
+                params![article_key_from_url(&article_url), article_url],
+            )?;
+        }
+
+        let mut grouped = std::collections::HashMap::<String, Vec<StoredArticle>>::new();
+        for article in articles {
+            grouped
+                .entry(article.article_key.clone())
+                .or_default()
+                .push(article);
+        }
+
+        for duplicates in grouped.values().filter(|articles| articles.len() > 1) {
+            let freshest = duplicates
+                .iter()
+                .max_by(|left, right| {
+                    left.fetched_at
+                        .cmp(&right.fetched_at)
+                        .then(left.id.cmp(&right.id))
+                })
+                .expect("duplicate group is non-empty");
+            let linked = duplicates
+                .iter()
+                .filter(|article| article.uploaded_to_lingq || article.lingq_lesson_id.is_some())
+                .max_by(|left, right| {
+                    left.fetched_at
+                        .cmp(&right.fetched_at)
+                        .then(left.id.cmp(&right.id))
+                });
+            let uploaded_to_lingq = linked.is_some();
+            let lingq_lesson_id = linked.and_then(|article| article.lingq_lesson_id);
+            let lingq_lesson_url = linked
+                .map(|article| article.lingq_lesson_url.clone())
+                .unwrap_or_default();
+
+            tx.execute(
+                "UPDATE articles
+                 SET article_key = ?1,
+                     url = ?2,
+                     title = ?3,
+                     subtitle = ?4,
+                     author = ?5,
+                     date = ?6,
+                     section = ?7,
+                     clean_text = ?8,
+                     word_count = ?9,
+                     difficulty = ?10,
+                     fetched_at = ?11,
+                     uploaded_to_lingq = ?12,
+                     lingq_lesson_id = ?13,
+                     lingq_lesson_url = ?14,
+                     paywalled = ?15
+                 WHERE id = ?16",
+                params![
+                    &freshest.article_key,
+                    &freshest.url,
+                    &freshest.title,
+                    &freshest.subtitle,
+                    &freshest.author,
+                    &freshest.date,
+                    &freshest.section,
+                    &freshest.clean_text,
+                    freshest.word_count,
+                    freshest.difficulty,
+                    &freshest.fetched_at,
+                    if uploaded_to_lingq { 1 } else { 0 },
+                    lingq_lesson_id,
+                    lingq_lesson_url,
+                    freshest.paywalled as i64,
+                    freshest.id,
+                ],
+            )?;
+
+            for duplicate in duplicates {
+                if duplicate.id == freshest.id {
+                    continue;
+                }
+                tx.execute("DELETE FROM articles WHERE id = ?1", params![duplicate.id])?;
+            }
+        }
+
+        tx.execute_batch(
+            r#"
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_articles_article_key_unique
+                ON articles(article_key);
+            CREATE INDEX IF NOT EXISTS idx_lingq_links_article_key
+                ON lingq_links(article_key);
+            INSERT INTO schema_version (version) VALUES (9);
+            "#,
+        )?;
+
+        tx.commit()?;
+        Ok(())
+    }
+}
+
+fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for name in columns {
+        if name? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn map_article_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredArticleMeta> {
     Ok(StoredArticleMeta {
         id: row.get(0)?,
-        url: row.get(1)?,
-        title: row.get(2)?,
-        subtitle: row.get(3)?,
-        author: row.get(4)?,
-        date: row.get(5)?,
-        section: row.get(6)?,
-        word_count: row.get(7)?,
-        difficulty: row.get(8)?,
-        fetched_at: row.get(9)?,
-        uploaded_to_lingq: row.get::<_, i64>(10)? != 0,
-        lingq_lesson_id: row.get(11)?,
-        lingq_lesson_url: row.get(12)?,
-        paywalled: row.get::<_, i64>(13)? != 0,
-    })
-}
-
-fn map_article_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredArticle> {
-    Ok(StoredArticle {
-        id: row.get(0)?,
-        url: row.get(1)?,
-        title: row.get(2)?,
-        subtitle: row.get(3)?,
-        author: row.get(4)?,
-        date: row.get(5)?,
-        section: row.get(6)?,
-        clean_text: row.get(7)?,
+        article_key: row.get(1)?,
+        url: row.get(2)?,
+        title: row.get(3)?,
+        subtitle: row.get(4)?,
+        author: row.get(5)?,
+        date: row.get(6)?,
+        section: row.get(7)?,
         word_count: row.get(8)?,
         difficulty: row.get(9)?,
         fetched_at: row.get(10)?,
@@ -915,21 +1048,49 @@ fn map_article_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredArticle> {
     })
 }
 
+fn map_article_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredArticle> {
+    Ok(StoredArticle {
+        id: row.get(0)?,
+        article_key: row.get(1)?,
+        url: row.get(2)?,
+        title: row.get(3)?,
+        subtitle: row.get(4)?,
+        author: row.get(5)?,
+        date: row.get(6)?,
+        section: row.get(7)?,
+        clean_text: row.get(8)?,
+        word_count: row.get(9)?,
+        difficulty: row.get(10)?,
+        fetched_at: row.get(11)?,
+        uploaded_to_lingq: row.get::<_, i64>(12)? != 0,
+        lingq_lesson_id: row.get(13)?,
+        lingq_lesson_url: row.get(14)?,
+        paywalled: row.get::<_, i64>(15)? != 0,
+    })
+}
+
 /// Sanitize user input for FTS5 MATCH queries.
-/// Strips FTS5 operators and wraps each word with `"..."` to treat them as literals,
-/// joined with implicit AND. Returns empty string if nothing usable remains.
+/// Splits on non-alphanumeric characters and wraps each token with `"..."` to treat
+/// them as literals, joined with implicit AND. Returns empty string if nothing usable
+/// remains.
 fn sanitize_fts_query(input: &str) -> String {
-    input
-        .split_whitespace()
-        .map(|word| {
-            // Strip FTS5 special chars: " * ^ ( ) { } : + -
-            let clean: String = word
-                .chars()
-                .filter(|ch| !matches!(ch, '"' | '*' | '^' | '(' | ')' | '{' | '}' | ':' | '+'))
-                .collect();
-            clean.trim_matches('-').to_owned()
-        })
-        .filter(|word| !word.is_empty())
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+
+    for ch in input.chars() {
+        if ch.is_alphanumeric() {
+            current.push(ch);
+        } else if !current.is_empty() {
+            tokens.push(std::mem::take(&mut current));
+        }
+    }
+
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+
+    tokens
+        .into_iter()
         .map(|word| format!("\"{word}\""))
         .collect::<Vec<_>>()
         .join(" ")
@@ -958,6 +1119,7 @@ fn json_escape(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     // ── sanitize_fts_query ──
 
@@ -968,7 +1130,10 @@ mod tests {
 
     #[test]
     fn sanitize_fts_strips_operators() {
-        assert_eq!(sanitize_fts_query(r#"hello "world" NOT"#), r#""hello" "world" "NOT""#);
+        assert_eq!(
+            sanitize_fts_query(r#"hello "world" NOT"#),
+            r#""hello" "world" "NOT""#
+        );
     }
 
     #[test]
@@ -978,7 +1143,18 @@ mod tests {
 
     #[test]
     fn sanitize_fts_trims_leading_trailing_dashes() {
-        assert_eq!(sanitize_fts_query("-negated- --double--"), r#""negated" "double""#);
+        assert_eq!(
+            sanitize_fts_query("-negated- --double--"),
+            r#""negated" "double""#
+        );
+    }
+
+    #[test]
+    fn sanitize_fts_splits_hyphenated_words() {
+        assert_eq!(
+            sanitize_fts_query("Energiewende-Experten"),
+            r#""Energiewende" "Experten""#
+        );
     }
 
     #[test]
@@ -1002,6 +1178,7 @@ mod tests {
     fn save_and_retrieve_article() {
         let db = Database::open(Path::new(":memory:")).unwrap();
         let article = Article {
+            article_key: article_key_from_url("https://taz.de/test/!1234/"),
             url: "https://taz.de/test/!1234/".to_owned(),
             title: "Test Article".to_owned(),
             subtitle: "A subtitle".to_owned(),
@@ -1029,6 +1206,7 @@ mod tests {
     fn save_article_upsert_returns_same_id() {
         let db = Database::open(Path::new(":memory:")).unwrap();
         let article = Article {
+            article_key: article_key_from_url("https://taz.de/test/!1234/"),
             url: "https://taz.de/test/!1234/".to_owned(),
             title: "Original".to_owned(),
             subtitle: String::new(),
@@ -1057,6 +1235,7 @@ mod tests {
     fn mark_uploaded_and_query() {
         let db = Database::open(Path::new(":memory:")).unwrap();
         let article = Article {
+            article_key: article_key_from_url("https://taz.de/test/!5678/"),
             url: "https://taz.de/test/!5678/".to_owned(),
             title: "Upload Test".to_owned(),
             subtitle: String::new(),
@@ -1071,18 +1250,21 @@ mod tests {
             paywalled: false,
         };
         let id = db.save_article(&article).unwrap();
-        db.mark_uploaded(id, 999, "https://lingq.com/lesson/999/").unwrap();
+        db.mark_uploaded(id, 999, "https://lingq.com/lesson/999/")
+            .unwrap();
 
         let stored = db.get_article(id).unwrap().unwrap();
         assert!(stored.uploaded_to_lingq);
         assert_eq!(stored.lingq_lesson_id, Some(999));
 
         // only_not_uploaded should exclude it
-        let results = db.list_articles(&ArticleQuery {
-            only_not_uploaded: true,
-            limit: 100,
-            ..Default::default()
-        }).unwrap();
+        let results = db
+            .list_articles(&ArticleQuery {
+                only_not_uploaded: true,
+                limit: 100,
+                ..Default::default()
+            })
+            .unwrap();
         assert!(results.is_empty());
     }
 
@@ -1090,6 +1272,7 @@ mod tests {
     fn re_saved_article_restores_lingq_link_history() {
         let db = Database::open(Path::new(":memory:")).unwrap();
         let article = Article {
+            article_key: article_key_from_url("https://taz.de/test/!7777/"),
             url: "https://taz.de/test/!7777/".to_owned(),
             title: "History Test".to_owned(),
             subtitle: String::new(),
@@ -1105,7 +1288,8 @@ mod tests {
         };
 
         let id = db.save_article(&article).unwrap();
-        db.mark_uploaded(id, 12345, "https://lingq.com/lesson/12345/").unwrap();
+        db.mark_uploaded(id, 12345, "https://lingq.com/lesson/12345/")
+            .unwrap();
         db.delete_article(id).unwrap();
 
         let new_id = db.save_article(&article).unwrap();
@@ -1120,7 +1304,8 @@ mod tests {
         let db = Database::open(Path::new(":memory:")).unwrap();
         let article = make_article("https://taz.de/a/!linked/", "Linked");
         let id = db.save_article(&article).unwrap();
-        db.mark_uploaded(id, 54321, "https://lingq.com/lesson/54321/").unwrap();
+        db.mark_uploaded(id, 54321, "https://lingq.com/lesson/54321/")
+            .unwrap();
         db.delete_article(id).unwrap();
 
         db.save_articles_batch(&[article]).unwrap();
@@ -1139,6 +1324,7 @@ mod tests {
     fn delete_article_removes_it() {
         let db = Database::open(Path::new(":memory:")).unwrap();
         let article = Article {
+            article_key: article_key_from_url("https://taz.de/test/!9999/"),
             url: "https://taz.de/test/!9999/".to_owned(),
             title: "Delete Me".to_owned(),
             subtitle: String::new(),
@@ -1164,6 +1350,7 @@ mod tests {
         assert_eq!(stats.total_articles, 0);
 
         let article = Article {
+            article_key: article_key_from_url("https://taz.de/test/!1111/"),
             url: "https://taz.de/test/!1111/".to_owned(),
             title: "Stats Test".to_owned(),
             subtitle: String::new(),
@@ -1187,10 +1374,32 @@ mod tests {
         assert_eq!(stats.sections[0].section, "Sport");
     }
 
+    #[test]
+    fn list_articles_meta_search_matches_hyphenated_terms() {
+        let db = Database::open(Path::new(":memory:")).unwrap();
+        let article = make_article(
+            "https://taz.de/Sonniges-Wochenende/!6175897/",
+            "Sonniges Wochenende: Energiewende-Experten verzweifeln wegen Stromüberschüssen",
+        );
+        db.save_article(&article).unwrap();
+
+        let results = db
+            .list_articles_meta(&ArticleQuery {
+                search: Some("Energiewende-Experten".to_owned()),
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, article.title);
+    }
+
     // ── Batch save ──
 
     fn make_article(url: &str, title: &str) -> Article {
         Article {
+            article_key: article_key_from_url(url),
             url: url.to_owned(),
             title: title.to_owned(),
             subtitle: String::new(),
@@ -1236,6 +1445,100 @@ mod tests {
     }
 
     #[test]
+    fn migration_v9_merges_duplicate_article_keys() {
+        let path = unique_temp_db_path("migrate-v9");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE schema_version (version INTEGER NOT NULL);
+            INSERT INTO schema_version (version) VALUES (8);
+
+            CREATE TABLE articles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                url TEXT NOT NULL UNIQUE,
+                title TEXT NOT NULL,
+                subtitle TEXT NOT NULL DEFAULT '',
+                author TEXT NOT NULL DEFAULT '',
+                date TEXT NOT NULL DEFAULT '',
+                section TEXT NOT NULL DEFAULT '',
+                clean_text TEXT NOT NULL,
+                word_count INTEGER NOT NULL DEFAULT 0,
+                fetched_at TEXT NOT NULL,
+                uploaded_to_lingq INTEGER NOT NULL DEFAULT 0,
+                lingq_lesson_id INTEGER,
+                lingq_lesson_url TEXT NOT NULL DEFAULT '',
+                difficulty INTEGER NOT NULL DEFAULT 3,
+                paywalled INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE lingq_links (
+                article_url TEXT PRIMARY KEY,
+                lesson_id INTEGER NOT NULL,
+                lesson_url TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            "#,
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO articles (
+                url, title, subtitle, author, date, section, clean_text, word_count, fetched_at,
+                uploaded_to_lingq, lingq_lesson_id, lingq_lesson_url, difficulty, paywalled
+            ) VALUES (?1, ?2, '', '', '', 'Politik', 'Old body', 100, ?3, 0, NULL, '', 3, 0)",
+            params![
+                "https://taz.de/Alter-Slug/!6175897/",
+                "Older copy",
+                "2026-05-01T12:00:00Z"
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO articles (
+                url, title, subtitle, author, date, section, clean_text, word_count, fetched_at,
+                uploaded_to_lingq, lingq_lesson_id, lingq_lesson_url, difficulty, paywalled
+            ) VALUES (?1, ?2, '', '', '', 'Politik', 'New body', 110, ?3, 1, 555, ?4, 3, 0)",
+            params![
+                "https://taz.de/Neuer-Slug/!6175897/",
+                "Newer copy",
+                "2026-05-02T12:00:00Z",
+                "https://www.lingq.com/de/learn/lesson/555/"
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO lingq_links (article_url, lesson_id, lesson_url) VALUES (?1, 555, ?2)",
+            params![
+                "https://taz.de/Alter-Slug/!6175897/",
+                "https://www.lingq.com/de/learn/lesson/555/"
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let db = Database::open(&path).unwrap();
+        let articles = db
+            .list_articles(&ArticleQuery {
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(articles.len(), 1);
+        assert_eq!(articles[0].article_key, "6175897");
+        assert_eq!(articles[0].url, "https://taz.de/Neuer-Slug/!6175897/");
+        assert_eq!(articles[0].title, "Newer copy");
+        assert!(articles[0].uploaded_to_lingq);
+        assert_eq!(articles[0].lingq_lesson_id, Some(555));
+
+        let article_keys = db.get_all_article_keys().unwrap();
+        assert_eq!(article_keys, HashSet::from([String::from("6175897")]));
+
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[test]
     fn save_articles_batch_empty_input() {
         let db = Database::open(Path::new(":memory:")).unwrap();
         let saved = db.save_articles_batch(&[]).unwrap();
@@ -1247,7 +1550,8 @@ mod tests {
     #[test]
     fn export_csv_includes_header_and_data() {
         let db = Database::open(Path::new(":memory:")).unwrap();
-        db.save_article(&make_article("https://taz.de/a/!1/", "Export Test")).unwrap();
+        db.save_article(&make_article("https://taz.de/a/!1/", "Export Test"))
+            .unwrap();
         let csv = db.export_csv().unwrap();
         assert!(csv.starts_with("id,url,title,"));
         assert!(csv.contains("Export Test"));
@@ -1256,7 +1560,8 @@ mod tests {
     #[test]
     fn export_json_is_valid_array() {
         let db = Database::open(Path::new(":memory:")).unwrap();
-        db.save_article(&make_article("https://taz.de/a/!1/", "JSON Test")).unwrap();
+        db.save_article(&make_article("https://taz.de/a/!1/", "JSON Test"))
+            .unwrap();
         let json = db.export_json().unwrap();
         assert!(json.starts_with('['));
         assert!(json.ends_with(']'));
@@ -1279,5 +1584,13 @@ mod tests {
     fn json_escape_handles_special_chars() {
         assert_eq!(json_escape("line1\nline2"), r#""line1\nline2""#);
         assert_eq!(json_escape(r#"say "hi""#), r#""say \"hi\"""#);
+    }
+
+    fn unique_temp_db_path(label: &str) -> std::path::PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("taz-reader-db-{label}-{nonce}.sqlite"))
     }
 }

@@ -82,11 +82,10 @@ pub struct SettingsStore {
 }
 
 impl SettingsStore {
-    /// Create a store with defaults that saves to a temp-dir path.
-    /// Used when the normal settings path is inaccessible.
-    pub fn in_memory_default() -> Self {
+    /// Create a fallback store that writes to a temp path.
+    pub fn fallback_default() -> Self {
         Self {
-            path: std::env::temp_dir().join("taz_reader_settings.json"),
+            path: std::env::temp_dir().join("taz-reader-settings.json"),
             data: AppSettings::default(),
         }
     }
@@ -135,6 +134,10 @@ impl SettingsStore {
     }
 
     pub fn save(&self) -> Result<()> {
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
         let raw =
             serde_json::to_string_pretty(&self.data).context("failed to serialize settings")?;
         std::fs::write(&self.path, raw)
@@ -143,36 +146,29 @@ impl SettingsStore {
     }
 }
 
-// ── Separate API key storage ──
-//
-// The LingQ API key is stored in its own file rather than in settings.json
-// to reduce exposure. On Linux/macOS the file gets restricted permissions (0600).
-// If the OS keyring crate becomes available, this can be upgraded to use it.
+// Store the LingQ token outside `settings.json`.
 
 fn api_key_path() -> Result<PathBuf> {
     Ok(crate::app_data_dir()?.join("lingq_token"))
 }
 
-/// Load the LingQ API key from its dedicated file, falling back to settings.json
-/// for migration from older versions.
+/// Load the LingQ API key from its dedicated file, falling back to `settings.json`
+/// so older installs can migrate forward.
 pub fn load_api_key(settings: &mut AppSettings) -> String {
-    // Try the dedicated token file first
-    if let Ok(path) = api_key_path() {
-        if path.exists() {
-            if let Ok(token) = std::fs::read_to_string(&path) {
-                let token = token.trim().to_owned();
-                if !token.is_empty() {
-                    return token;
-                }
-            }
+    if let Ok(path) = api_key_path()
+        && path.exists()
+        && let Ok(token) = std::fs::read_to_string(&path)
+    {
+        let token = token.trim().to_owned();
+        if !token.is_empty() {
+            return token;
         }
     }
-    // Fall back to the legacy settings.json field and migrate it out
     let legacy = std::mem::take(&mut settings.lingq_api_key);
-    if !legacy.trim().is_empty() {
-        if let Err(err) = save_api_key(&legacy) {
-            warn!("Failed to migrate API key to token file: {err:#}");
-        }
+    if !legacy.trim().is_empty()
+        && let Err(err) = save_api_key(&legacy)
+    {
+        warn!("Failed to migrate API key to token file: {err:#}");
     }
     legacy
 }
@@ -195,35 +191,34 @@ pub fn save_api_key(key: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn settings_round_trip() {
-        let dir = std::env::temp_dir().join("taz_test_settings");
+        let dir = unique_temp_dir("round-trip");
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("test_settings.json");
 
-        // Save non-default settings
         let store = SettingsStore::load(path.clone()).unwrap();
         store.save().unwrap();
 
-        // Update and re-save
         let mut store = SettingsStore::load(path.clone()).unwrap();
-        store.update(|s| {
-            s.browse_section = "kultur".to_owned();
-            s.browse_only_new = false;
-            s.library_sort = "title".to_owned();
-            s.library_duplicate_only = true;
-            s.article_density = "comfortable".to_owned();
-            s.lingq_language = "fr".to_owned();
-            s.bulk_max_articles = "100".to_owned();
-        }).unwrap();
+        store
+            .update(|s| {
+                s.browse_section = "kultur".to_owned();
+                s.browse_only_new = false;
+                s.library_sort = "title".to_owned();
+                s.library_duplicate_only = true;
+                s.article_density = "comfortable".to_owned();
+                s.lingq_language = "fr".to_owned();
+                s.bulk_max_articles = "100".to_owned();
+            })
+            .unwrap();
 
-        // Reload and verify
         let loaded = SettingsStore::load(path.clone()).unwrap();
         let d = loaded.data();
         assert_eq!(d.browse_section, "kultur");
-        assert_eq!(d.browse_only_new, false);
+        assert!(!d.browse_only_new);
         assert_eq!(d.library_sort, "title");
         assert!(d.library_duplicate_only);
         assert_eq!(d.article_density, "comfortable");
@@ -235,7 +230,7 @@ mod tests {
 
     #[test]
     fn settings_malformed_json_uses_defaults() {
-        let dir = std::env::temp_dir().join("taz_test_malformed");
+        let dir = unique_temp_dir("malformed");
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("bad_settings.json");
         std::fs::write(&path, "not json at all").unwrap();
@@ -250,14 +245,15 @@ mod tests {
 
     #[test]
     fn settings_missing_file_uses_defaults() {
-        let path = PathBuf::from("/tmp/taz_nonexistent_12345.json");
+        let dir = unique_temp_dir("missing");
+        let path = dir.join("missing.json");
         let store = SettingsStore::load(path).unwrap();
         assert_eq!(store.data().browse_section, "politik");
     }
 
     #[test]
     fn settings_partial_json_fills_defaults() {
-        let dir = std::env::temp_dir().join("taz_test_partial");
+        let dir = unique_temp_dir("partial");
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("partial.json");
         std::fs::write(&path, r#"{"browse_section":"sport"}"#).unwrap();
@@ -265,15 +261,37 @@ mod tests {
         let store = SettingsStore::load(path).unwrap();
         let d = store.data();
         assert_eq!(d.browse_section, "sport");
-        assert_eq!(d.lingq_language, "de"); // default for missing field
+        assert_eq!(d.lingq_language, "de");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn in_memory_default_has_correct_defaults() {
-        let store = SettingsStore::in_memory_default();
+    fn fallback_default_has_correct_defaults() {
+        let store = SettingsStore::fallback_default();
         assert_eq!(store.data().browse_section, "politik");
         assert_eq!(store.data().lingq_language, "de");
+    }
+
+    #[test]
+    fn save_creates_missing_parent_directory() {
+        let dir = unique_temp_dir("save-parent");
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("nested").join("settings.json");
+
+        let store = SettingsStore::load(path.clone()).unwrap();
+        store.save().unwrap();
+
+        assert!(path.exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn unique_temp_dir(label: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("taz-reader-settings-{label}-{nonce}"))
     }
 }

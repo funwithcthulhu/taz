@@ -84,7 +84,11 @@ pub struct LingqClient {
 impl LingqClient {
     pub fn new() -> Result<Self> {
         let client = Client::builder()
-            .user_agent(format!("taz_lingq_tool/{}", env!("CARGO_PKG_VERSION")))
+            .user_agent(format!(
+                "{}/{}",
+                env!("CARGO_PKG_NAME"),
+                env!("CARGO_PKG_VERSION")
+            ))
             .timeout(std::time::Duration::from_secs(30))
             .connect_timeout(std::time::Duration::from_secs(10))
             .build()
@@ -120,7 +124,11 @@ impl LingqClient {
         Ok(LoginResponse { token })
     }
 
-    pub async fn get_collections(&self, api_key: &str, language_code: &str) -> Result<Vec<Collection>> {
+    pub async fn get_collections(
+        &self,
+        api_key: &str,
+        language_code: &str,
+    ) -> Result<Vec<Collection>> {
         let mut all_collections = Vec::new();
         let mut url = Some(format!("{}/{}/collections/my/", LINGQ_BASE, language_code));
         let max_pages = 20;
@@ -228,9 +236,10 @@ impl LingqClient {
                 .context("failed to parse LingQ lessons response")?;
 
             let (mut rows, next) = extract_lesson_rows(value)?;
-            lessons.extend(rows.drain(..).filter_map(|row| {
-                parse_remote_lesson(row, language_code)
-            }));
+            lessons.extend(
+                rows.drain(..)
+                    .filter_map(|row| parse_remote_lesson(row, language_code)),
+            );
             url = next;
         }
 
@@ -258,8 +267,9 @@ impl LingqClient {
             payload["original_url"] = serde_json::json!(original_url);
         }
 
-        let mut auth = reqwest::header::HeaderValue::from_str(&format!("Token {}", request.api_key))
-            .context("invalid API key characters")?;
+        let mut auth =
+            reqwest::header::HeaderValue::from_str(&format!("Token {}", request.api_key))
+                .context("invalid API key characters")?;
         auth.set_sensitive(true);
         let response = self
             .client
@@ -289,7 +299,11 @@ impl LingqClient {
     /// Update an existing lesson on LingQ (PATCH). Useful when article text
     /// has been re-fetched with better content or the article was previously
     /// paywalled and is now available.
-    pub async fn update_lesson(&self, request: &UploadRequest, lesson_id: i64) -> Result<UploadResponse> {
+    pub async fn update_lesson(
+        &self,
+        request: &UploadRequest,
+        lesson_id: i64,
+    ) -> Result<UploadResponse> {
         info!("Updating LingQ lesson {}: {}", lesson_id, request.title);
         let normalized_text = normalize_text(&request.text);
         if normalized_text.trim().is_empty() {
@@ -305,12 +319,16 @@ impl LingqClient {
             payload["original_url"] = serde_json::json!(original_url);
         }
 
-        let mut auth = reqwest::header::HeaderValue::from_str(&format!("Token {}", request.api_key))
-            .context("invalid API key characters")?;
+        let mut auth =
+            reqwest::header::HeaderValue::from_str(&format!("Token {}", request.api_key))
+                .context("invalid API key characters")?;
         auth.set_sensitive(true);
         let response = self
             .client
-            .patch(format!("{}/{}/lessons/{}/", LINGQ_BASE, request.language_code, lesson_id))
+            .patch(format!(
+                "{}/{}/lessons/{}/",
+                LINGQ_BASE, request.language_code, lesson_id
+            ))
             .header("Authorization", auth)
             .json(&payload)
             .send()
@@ -335,13 +353,15 @@ impl LingqClient {
     }
 }
 
-fn extract_lesson_rows(value: serde_json::Value) -> Result<(Vec<serde_json::Value>, Option<String>)> {
+fn extract_lesson_rows(
+    value: serde_json::Value,
+) -> Result<(Vec<serde_json::Value>, Option<String>)> {
     if let Some(array) = value.as_array() {
         return Ok((array.clone(), None));
     }
 
-    let page: LingqLessonPage = serde_json::from_value(value)
-        .context("failed to decode LingQ lesson page")?;
+    let page: LingqLessonPage =
+        serde_json::from_value(value).context("failed to decode LingQ lesson page")?;
     let rows = page
         .results
         .or(page.lessons)
