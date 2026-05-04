@@ -1,21 +1,28 @@
 # Taz Reader
 
-Taz Reader is a Windows desktop app for browsing articles from [`taz.de`](https://taz.de), saving them in a local library, and uploading selected texts to LingQ.
+Personal Rust/Slint desktop tool for saving taz articles locally and managing LingQ import workflows.
 
-This repository ships a GUI application. It does not include a supported CLI or a stable library API.
+This is a personal tool, not a polished product. I use it to save articles from [`taz.de`](https://taz.de) locally and sometimes push them into LingQ.
+
+This is mainly a Windows GUI app. It does not provide a supported CLI or a stable library API.
 
 ## What It Does
 
-- Browse built-in `taz.de` sections and related topic pages.
+- Browse a handful of built-in `taz.de` sections and related topic pages.
 - Search `taz.de` from inside the app.
-- Save cleaned article text, metadata, word counts, and paywall hints in a local SQLite library.
-- Filter the library by title, section, upload status, duplicate likelihood, and word count.
-- Preview cleaned article text before uploading it.
-- Upload selected articles to a LingQ course or refresh an existing LingQ lesson with cleaned text.
+- Save cleaned article text and metadata into a local SQLite library.
+- Filter the library before uploading to LingQ.
+- Preview cleaned article text and upload it to a LingQ course.
 - Sync LingQ lesson status back into the local library.
-- Build a Windows installer.
 
-## Quick Start
+## Caveats
+
+- Really only for Windows.
+- I mostly test it on my own machine.
+- It may break when `taz.de` or LingQ change their HTML or API behavior.
+- Public builds are unsigned, so Windows may show an Unknown publisher or SmartScreen warning.
+
+## Running It
 
 ### Run the app from source
 
@@ -23,7 +30,7 @@ This repository ships a GUI application. It does not include a supported CLI or 
 cargo run
 ```
 
-This launches the GUI.
+This starts the GUI.
 
 ### Build a release binary
 
@@ -31,14 +38,14 @@ This launches the GUI.
 cargo build --release
 ```
 
-### Validate the repo
+### Check that it still works
 
 ```powershell
 cargo test -- --test-threads=1
 cargo clippy --all-targets -- -D warnings
 ```
 
-## LingQ Authentication
+## LingQ
 
 Taz Reader stores the LingQ token in the app data directory as a separate file, not inside `settings.json`.
 
@@ -54,7 +61,7 @@ Taz Reader stores app data under:
 
 `%LOCALAPPDATA%\taz-reader\`
 
-That includes:
+That folder contains:
 
 - the SQLite library database
 - settings and UI state
@@ -64,7 +71,7 @@ Older installs that used `%LOCALAPPDATA%\taz_lingq_tool\` are migrated automatic
 
 The GUI includes an **Open library folder** action for jumping directly to this location.
 
-## Windows Installer
+## Installer
 
 One-time prerequisite:
 
@@ -78,15 +85,15 @@ Build the installer:
 .\scripts\build-installer.ps1
 ```
 
-Expected output:
+Output:
 
 `installer\output\taz-reader-setup.exe`
 
-The installer build script reads the version from `Cargo.toml`, builds the release binary, and passes the version through to Inno Setup so packaging metadata stays in sync.
+The installer script reads the version from `Cargo.toml`, builds the release binary, and passes the same version to Inno Setup.
 
-## Release Workflow
+## Release Script
 
-To validate, build the installer, and optionally publish a GitHub release:
+To run the usual checks, build the installer, and optionally update the GitHub release:
 
 ```powershell
 # Validate and build only
@@ -96,7 +103,7 @@ To validate, build the installer, and optionally publish a GitHub release:
 .\scripts\release.ps1 -Publish
 ```
 
-The release helper:
+The release script:
 
 - runs the test suite serially
 - runs strict Clippy checks
@@ -125,7 +132,7 @@ scripts/
   release.ps1           Test, lint, package, and optional GitHub release helper
 ```
 
-## Tech Stack
+## Stack
 
 - Rust 2024
 - Slint for the desktop UI
@@ -136,6 +143,5 @@ scripts/
 
 ## Notes
 
-- The project targets Windows and runs as a native desktop executable.
 - The release binary hides the console window on Windows.
-- Public builds are currently unsigned, so Windows may show an Unknown publisher or SmartScreen warning.
+- There is no separate service or cloud piece. Everything else stays local.

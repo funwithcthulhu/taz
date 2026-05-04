@@ -1,4 +1,4 @@
-# Validate the repo, build the installer, and optionally publish a GitHub release.
+# Run checks, build the installer, and optionally update the GitHub release.
 #
 # Usage:
 #   .\scripts\release.ps1
@@ -51,12 +51,12 @@ gh auth status | Out-Host
 if ($LASTEXITCODE -ne 0) { throw "GitHub CLI is not authenticated" }
 
 $notes = @"
-Windows installer for Taz Reader $version.
+Installer build for Taz Reader $version.
 
 SHA256:
 $hash
 
-This build is unsigned, so Windows may show an Unknown publisher or SmartScreen warning on first install.
+Unsigned build. Windows may show an Unknown publisher or SmartScreen warning.
 "@
 
 $existing = gh release view $tag --repo $Repo --json tagName 2>$null
