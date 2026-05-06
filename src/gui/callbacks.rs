@@ -377,7 +377,6 @@ pub(super) fn wire_callbacks(window: &AppWindow, state: &Rc<RefCell<AppState>>) 
         app.sync_to_window();
     });
 
-    // Enter key in library search applies filters (re-queries SQLite)
     let state_clone = state.clone();
     window.on_library_search_accepted(move || {
         let mut app = state_clone.borrow_mut();
@@ -419,7 +418,6 @@ pub(super) fn wire_callbacks(window: &AppWindow, state: &Rc<RefCell<AppState>>) 
         app.browse.search_query = value.to_string();
     });
 
-    // taz.de search
     let state_clone = state.clone();
     window.on_taz_search(move || {
         let mut app = state_clone.borrow_mut();
@@ -427,7 +425,6 @@ pub(super) fn wire_callbacks(window: &AppWindow, state: &Rc<RefCell<AppState>>) 
         app.run_taz_search();
     });
 
-    // Cancel running background operation
     let state_clone = state.clone();
     window.on_cancel_operation(move || {
         let mut app = state_clone.borrow_mut();
@@ -449,7 +446,6 @@ pub(super) fn wire_callbacks(window: &AppWindow, state: &Rc<RefCell<AppState>>) 
         state_clone.borrow_mut().clear_failed_items();
     });
 
-    // Keyboard navigation: move selection up in library list
     let state_clone = state.clone();
     window.on_library_key_up(move || {
         let mut app = state_clone.borrow_mut();
@@ -473,7 +469,6 @@ pub(super) fn wire_callbacks(window: &AppWindow, state: &Rc<RefCell<AppState>>) 
         }
     });
 
-    // Keyboard navigation: move selection down in library list
     let state_clone = state.clone();
     window.on_library_key_down(move || {
         let mut app = state_clone.borrow_mut();
@@ -499,7 +494,6 @@ pub(super) fn wire_callbacks(window: &AppWindow, state: &Rc<RefCell<AppState>>) 
         }
     });
 
-    // Keyboard navigation: toggle upload selection for currently viewed article
     let state_clone = state.clone();
     window.on_library_key_space(move || {
         let mut app = state_clone.borrow_mut();
@@ -509,7 +503,6 @@ pub(super) fn wire_callbacks(window: &AppWindow, state: &Rc<RefCell<AppState>>) 
         }
     });
 
-    // Toggle preview pane width
     let state_clone = state.clone();
     window.on_toggle_preview_width(move || {
         let mut app = state_clone.borrow_mut();

@@ -1,25 +1,26 @@
 # Taz Reader
 
-Personal Rust/Slint desktop tool for saving taz articles locally and managing LingQ import workflows.
+Personal Windows desktop app for saving articles from `taz.de` into a local library and sending selected text to LingQ.
 
 This is a personal tool, not a polished product. I use it to save articles from [`taz.de`](https://taz.de) locally and sometimes push them into LingQ.
 
 This is mainly a Windows GUI app. It does not provide a supported CLI or a stable library API.
 
-## What It Does
+## Current Scope
 
-- Browse a handful of built-in `taz.de` sections and related topic pages.
+- Browse built-in `taz.de` sections and related topic pages.
 - Search `taz.de` from inside the app.
-- Save cleaned article text and metadata into a local SQLite library.
-- Filter the library before uploading to LingQ.
-- Preview cleaned article text and upload it to a LingQ course.
-- Sync LingQ lesson status back into the local library.
+- Save extracted article text and metadata into a local SQLite library.
+- Filter the local library before uploading to LingQ.
+- Preview the saved text before sending it to a LingQ course.
+- Sync LingQ lesson status for stored articles.
 
 ## Caveats
 
 - Really only for Windows.
 - I mostly test it on my own machine.
-- It may break when `taz.de` or LingQ change their HTML or API behavior.
+- The `taz.de` parser is based on current HTML patterns and may break when the site changes.
+- LingQ support is limited to the token, course list, upload, and status-sync flows exposed in the GUI.
 - Public builds are unsigned, so Windows may show an Unknown publisher or SmartScreen warning.
 
 ## Running It
@@ -41,8 +42,9 @@ cargo build --release
 ### Check that it still works
 
 ```powershell
-cargo test -- --test-threads=1
+cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
+cargo test -- --test-threads=1
 ```
 
 ## LingQ
@@ -103,7 +105,7 @@ To run the usual checks, build the installer, and optionally update the GitHub r
 .\scripts\release.ps1 -Publish
 ```
 
-The release script:
+The release script does not run `cargo fmt`. It:
 
 - runs the test suite serially
 - runs strict Clippy checks
