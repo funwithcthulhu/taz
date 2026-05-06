@@ -312,7 +312,13 @@ mod tests {
     #[test]
     fn estimate_difficulty_complex_text_scores_higher() {
         let easy = "Das ist gut. Er ist da. Sie mag es. Wir auch. ".repeat(10);
-        let hard = "Die Bundesverfassungsgerichtsentscheidung über die Grundgesetzänderung zur Arbeitnehmerüberlassungsgesetzgebung wird weitreichende Konsequenzen haben. Die Verwaltungsgerichtsbarkeit prüft die Verhältnismäßigkeit der Maßnahmen zur Bekämpfung der Umweltverschmutzung. ".repeat(5);
+        let hard = concat!(
+            "Die Bundesverfassungsgerichtsentscheidung über die Grundgesetzänderung ",
+            "zur Arbeitnehmerüberlassungsgesetzgebung wird weitreichende Konsequenzen ",
+            "haben. Die Verwaltungsgerichtsbarkeit prüft die Verhältnismäßigkeit der ",
+            "Maßnahmen zur Bekämpfung der Umweltverschmutzung. ",
+        )
+        .repeat(5);
         assert!(
             estimate_difficulty(&hard) > estimate_difficulty(&easy),
             "complex German text should score higher"

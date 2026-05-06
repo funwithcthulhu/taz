@@ -18,10 +18,26 @@ const UPSERT_SET: &str = r#"
     fetched_at = excluded.fetched_at,
     paywalled = excluded.paywalled
 "#;
-const SELECT_ALL_COLS: &str = "id, article_key, url, title, subtitle, author, date, section, clean_text, word_count, difficulty, fetched_at, uploaded_to_lingq, lingq_lesson_id, lingq_lesson_url, paywalled";
-const SELECT_ALL_COLS_A: &str = "a.id, a.article_key, a.url, a.title, a.subtitle, a.author, a.date, a.section, a.clean_text, a.word_count, a.difficulty, a.fetched_at, a.uploaded_to_lingq, a.lingq_lesson_id, a.lingq_lesson_url, a.paywalled";
-const SELECT_META_COLS: &str = "id, article_key, url, title, subtitle, author, date, section, word_count, difficulty, fetched_at, uploaded_to_lingq, lingq_lesson_id, lingq_lesson_url, paywalled";
-const SELECT_META_COLS_A: &str = "a.id, a.article_key, a.url, a.title, a.subtitle, a.author, a.date, a.section, a.word_count, a.difficulty, a.fetched_at, a.uploaded_to_lingq, a.lingq_lesson_id, a.lingq_lesson_url, a.paywalled";
+const SELECT_ALL_COLS: &str = concat!(
+    "id, article_key, url, title, subtitle, author, date, section, ",
+    "clean_text, word_count, difficulty, fetched_at, uploaded_to_lingq, ",
+    "lingq_lesson_id, lingq_lesson_url, paywalled",
+);
+const SELECT_ALL_COLS_A: &str = concat!(
+    "a.id, a.article_key, a.url, a.title, a.subtitle, a.author, a.date, ",
+    "a.section, a.clean_text, a.word_count, a.difficulty, a.fetched_at, ",
+    "a.uploaded_to_lingq, a.lingq_lesson_id, a.lingq_lesson_url, a.paywalled",
+);
+const SELECT_META_COLS: &str = concat!(
+    "id, article_key, url, title, subtitle, author, date, section, word_count, ",
+    "difficulty, fetched_at, uploaded_to_lingq, lingq_lesson_id, ",
+    "lingq_lesson_url, paywalled",
+);
+const SELECT_META_COLS_A: &str = concat!(
+    "a.id, a.article_key, a.url, a.title, a.subtitle, a.author, a.date, ",
+    "a.section, a.word_count, a.difficulty, a.fetched_at, a.uploaded_to_lingq, ",
+    "a.lingq_lesson_id, a.lingq_lesson_url, a.paywalled",
+);
 
 #[derive(Debug, Clone)]
 pub struct StoredArticle {
@@ -541,24 +557,34 @@ impl Database {
             .query_map([], map_article_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
-        let entries: Vec<String> = articles.iter().map(|a| {
-            format!(
-                r#"  {{"id":{},"url":{},"title":{},"subtitle":{},"author":{},"date":{},"section":{},"word_count":{},"difficulty":{},"fetched_at":{},"uploaded_to_lingq":{},"lingq_lesson_id":{},"lingq_lesson_url":{}}}"#,
-                a.id,
-                json_escape(&a.url),
-                json_escape(&a.title),
-                json_escape(&a.subtitle),
-                json_escape(&a.author),
-                json_escape(&a.date),
-                json_escape(&a.section),
-                a.word_count,
-                a.difficulty,
-                json_escape(&a.fetched_at),
-                a.uploaded_to_lingq,
-                a.lingq_lesson_id.map(|id| id.to_string()).unwrap_or_else(|| "null".to_owned()),
-                json_escape(&a.lingq_lesson_url),
-            )
-        }).collect();
+        let entries: Vec<String> = articles
+            .iter()
+            .map(|a| {
+                format!(
+                    concat!(
+                        r#"  {{"id":{},"url":{},"title":{},"subtitle":{},"#,
+                        r#""author":{},"date":{},"section":{},"word_count":{},"#,
+                        r#""difficulty":{},"fetched_at":{},"uploaded_to_lingq":{},"#,
+                        r#""lingq_lesson_id":{},"lingq_lesson_url":{}}}"#,
+                    ),
+                    a.id,
+                    json_escape(&a.url),
+                    json_escape(&a.title),
+                    json_escape(&a.subtitle),
+                    json_escape(&a.author),
+                    json_escape(&a.date),
+                    json_escape(&a.section),
+                    a.word_count,
+                    a.difficulty,
+                    json_escape(&a.fetched_at),
+                    a.uploaded_to_lingq,
+                    a.lingq_lesson_id
+                        .map(|id| id.to_string())
+                        .unwrap_or_else(|| "null".to_owned()),
+                    json_escape(&a.lingq_lesson_url),
+                )
+            })
+            .collect();
 
         Ok(format!("[\n{}\n]", entries.join(",\n")))
     }

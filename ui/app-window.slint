@@ -1,11 +1,48 @@
 import { Button, CheckBox, ComboBox, LineEdit, ScrollView } from "std-widgets.slint";
 
-export struct BrowseRow { title: string, teaser: string, section: string, source: string, source_label: string, url: string, selected: bool, saved: bool }
-export struct BulkSectionRow { label: string, selected: bool }
-export struct LibraryRow { id: int, title: string, section: string, heading: string, date: string, words: string, difficulty: int, url: string, uploaded: bool, paywalled: bool, selected: bool, confirming-delete: bool, viewing: bool }
-export struct StatCard { label: string, value: string }
-export struct ActivityRow { kind: string, message: string, detail: string }
-export struct FailedRow { label: string, detail: string, retryable: bool }
+export struct BrowseRow {
+    title: string,
+    teaser: string,
+    section: string,
+    source: string,
+    source_label: string,
+    url: string,
+    selected: bool,
+    saved: bool,
+}
+export struct BulkSectionRow {
+    label: string,
+    selected: bool,
+}
+export struct LibraryRow {
+    id: int,
+    title: string,
+    section: string,
+    heading: string,
+    date: string,
+    words: string,
+    difficulty: int,
+    url: string,
+    uploaded: bool,
+    paywalled: bool,
+    selected: bool,
+    confirming-delete: bool,
+    viewing: bool,
+}
+export struct StatCard {
+    label: string,
+    value: string,
+}
+export struct ActivityRow {
+    kind: string,
+    message: string,
+    detail: string,
+}
+export struct FailedRow {
+    label: string,
+    detail: string,
+    retryable: bool,
+}
 
 component Panel inherits Rectangle {
     in property <brush> panel-background: #151c28;
@@ -26,7 +63,14 @@ component TextBtn inherits Rectangle {
     width: btn-text.preferred-width + 12px;
     border-radius: 4px;
     background: root.enabled && ta.has-hover ? #ffffff10 : transparent;
-    btn-text := Text { text: root.label; color: root.enabled ? (ta.has-hover ? #ffffff : root.text-color) : #607089; font-size: 11px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+    btn-text := Text {
+        text: root.label;
+        color: root.enabled ? (ta.has-hover ? #ffffff : root.text-color) : #607089;
+        font-size: 11px;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
     ta := TouchArea { enabled: root.enabled; mouse-cursor: root.enabled ? pointer : default; clicked => { root.clicked(); } }
 }
 
@@ -38,7 +82,14 @@ component PresetBtn inherits Rectangle {
     width: btn-text.preferred-width + 10px;
     border-radius: 4px;
     background: ta.has-hover ? #ffffff10 : transparent;
-    btn-text := Text { text: root.label; color: ta.has-hover ? #ccd6e6 : #8190ab; font-size: 10px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+    btn-text := Text {
+        text: root.label;
+        color: ta.has-hover ? #ccd6e6 : #8190ab;
+        font-size: 10px;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
     ta := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
 }
 
@@ -205,7 +256,15 @@ export component AppWindow inherits Window {
                             padding-left: 12px;
                             padding-right: 12px;
                             alignment: center;
-                            Text { text: "Browse"; color: white; horizontal-alignment: left; vertical-alignment: center; font-size: 15px; font-weight: 700; horizontal-stretch: 1; }
+                            Text {
+                                text: "Browse";
+                                color: white;
+                                horizontal-alignment: left;
+                                vertical-alignment: center;
+                                font-size: 15px;
+                                font-weight: 700;
+                                horizontal-stretch: 1;
+                            }
                             if root.browse-count != "" : VerticalLayout {
                                 alignment: center;
                                 Rectangle {
@@ -213,7 +272,16 @@ export component AppWindow inherits Window {
                                     height: 20px;
                                     border-radius: 10px;
                                     background: #2d4a6e;
-                                    browse-badge := Text { text: root.browse-count; color: #8fb8e8; font-size: 11px; font-weight: 700; width: parent.width; height: parent.height; horizontal-alignment: center; vertical-alignment: center; }
+                                    browse-badge := Text {
+                                        text: root.browse-count;
+                                        color: #8fb8e8;
+                                        font-size: 11px;
+                                        font-weight: 700;
+                                        width: parent.width;
+                                        height: parent.height;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
                                 }
                             }
                         }
@@ -229,7 +297,15 @@ export component AppWindow inherits Window {
                             padding-left: 12px;
                             padding-right: 12px;
                             alignment: center;
-                            Text { text: "Library + LingQ"; color: white; horizontal-alignment: left; vertical-alignment: center; font-size: 15px; font-weight: 700; horizontal-stretch: 1; }
+                            Text {
+                                text: "Library + LingQ";
+                                color: white;
+                                horizontal-alignment: left;
+                                vertical-alignment: center;
+                                font-size: 15px;
+                                font-weight: 700;
+                                horizontal-stretch: 1;
+                            }
                             if root.library-count != "" : VerticalLayout {
                                 alignment: center;
                                 Rectangle {
@@ -237,7 +313,16 @@ export component AppWindow inherits Window {
                                     height: 20px;
                                     border-radius: 10px;
                                     background: #2d4a6e;
-                                    library-badge := Text { text: root.library-count; color: #8fb8e8; font-size: 11px; font-weight: 700; width: parent.width; height: parent.height; horizontal-alignment: center; vertical-alignment: center; }
+                                    library-badge := Text {
+                                        text: root.library-count;
+                                        color: #8fb8e8;
+                                        font-size: 11px;
+                                        font-weight: 700;
+                                        width: parent.width;
+                                        height: parent.height;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
                                 }
                             }
                         }
@@ -282,7 +367,14 @@ export component AppWindow inherits Window {
                                     background: cancel-ta.has-hover ? #3a1520 : #2a1018;
                                     border-color: #e06070;
                                     border-width: 1px;
-                                    cancel-text := Text { text: "Cancel"; color: cancel-ta.has-hover ? #ff6070 : #e06070; font-size: 11px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+                                    cancel-text := Text {
+                                        text: "Cancel";
+                                        color: cancel-ta.has-hover ? #ff6070 : #e06070;
+                                        font-size: 11px;
+                                        font-weight: 600;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
                                     cancel-ta := TouchArea { mouse-cursor: pointer; clicked => { root.cancel-operation(); } }
                                 }
                                 Rectangle { }
@@ -458,9 +550,21 @@ export component AppWindow inherits Window {
                                     spacing: 5px;
                                     Text { text: "Bulk"; color: white; font-size: 13px; font-weight: 800; vertical-alignment: center; }
                                     Text { text: "From"; color: #8190ab; font-size: 11px; vertical-alignment: center; }
-                                    LineEdit { text <=> root.browse-date-from; placeholder-text: "YYYY-MM-DD"; min-width: 100px; max-width: 100px; edited => { root.browse-set-date-from(self.text); } }
+                                    LineEdit {
+                                        text <=> root.browse-date-from;
+                                        placeholder-text: "YYYY-MM-DD";
+                                        min-width: 100px;
+                                        max-width: 100px;
+                                        edited => { root.browse-set-date-from(self.text); }
+                                    }
                                     Text { text: "To"; color: #8190ab; font-size: 11px; vertical-alignment: center; }
-                                    LineEdit { text <=> root.browse-date-to; placeholder-text: "YYYY-MM-DD"; min-width: 100px; max-width: 100px; edited => { root.browse-set-date-to(self.text); } }
+                                    LineEdit {
+                                        text <=> root.browse-date-to;
+                                        placeholder-text: "YYYY-MM-DD";
+                                        min-width: 100px;
+                                        max-width: 100px;
+                                        edited => { root.browse-set-date-to(self.text); }
+                                    }
                                     Text { text: "Max"; color: #8190ab; font-size: 11px; vertical-alignment: center; }
                                     LineEdit { text <=> root.bulk-max-articles; placeholder-text: "60"; min-width: 40px; max-width: 40px; }
                                     Text { text: "Per sect"; color: #8190ab; font-size: 11px; vertical-alignment: center; }
@@ -548,7 +652,12 @@ export component AppWindow inherits Window {
                                                     spacing: 8px;
                                                     Text { text: article.title; color: white; font-size: 14px; font-weight: 750; horizontal-stretch: 1; overflow: elide; }
                                                     Text { text: article.section; color: #6e8bb5; font-size: 11px; vertical-alignment: center; }
-                                                    Text { text: article.saved ? "Saved" : "New"; color: article.saved ? #7ce2a4 : #ffb6c1; font-size: 11px; vertical-alignment: center; }
+                                                    Text {
+                                                        text: article.saved ? "Saved" : "New";
+                                                        color: article.saved ? #7ce2a4 : #ffb6c1;
+                                                        font-size: 11px;
+                                                        vertical-alignment: center;
+                                                    }
                                                 }
                                                 Text { text: article.teaser; color: #8f9db7; font-size: 12px; wrap: word-wrap; }
                                             }
@@ -557,7 +666,11 @@ export component AppWindow inherits Window {
                                                 spacing: 2px;
                                                 alignment: center;
                                                 TextBtn { label: "Open"; clicked => { root.browse-open-url(article.url); } }
-                                                TextBtn { label: article.saved ? "Resave" : "Save"; enabled: !root.progress-visible; clicked => { root.browse-save-single(article.url); } }
+                                                TextBtn {
+                                                    label: article.saved ? "Resave" : "Save";
+                                                    enabled: !root.progress-visible;
+                                                    clicked => { root.browse-save-single(article.url); }
+                                                }
                                             }
                                         }
                                     }
@@ -583,7 +696,12 @@ export component AppWindow inherits Window {
                                 padding-right: 10px;
                                 spacing: 5px;
                                 Text { text: "Filters"; color: #8190ab; font-size: 12px; font-weight: 700; vertical-alignment: center; }
-                                LineEdit { text <=> root.library-search; placeholder-text: "Search (Enter to apply)"; min-width: 160px; accepted => { root.library-search-accepted(); } }
+                                LineEdit {
+                                    text <=> root.library-search;
+                                    placeholder-text: "Search (Enter to apply)";
+                                    min-width: 160px;
+                                    accepted => { root.library-search-accepted(); }
+                                }
                                 ComboBox { model: root.heading-labels; current-index <=> root.library-heading-index; min-width: 110px; }
                                 ComboBox { model: root.section-labels; current-index <=> root.library-section-index; min-width: 110px; }
                                 ComboBox { model: root.sort-labels; current-index <=> root.library-sort-index; min-width: 90px; max-width: 90px; }
@@ -771,16 +889,45 @@ export component AppWindow inherits Window {
                                                         spacing: 1px;
                                                         HorizontalLayout {
                                                             spacing: 8px;
-                                                            Text { text: article.title; color: white; font-size: root.article-density-index == 0 ? 12px : 14px; font-weight: 760; horizontal-stretch: 1; overflow: elide; }
+                                                            Text {
+                                                                text: article.title;
+                                                                color: white;
+                                                                font-size: root.article-density-index == 0 ? 12px : 14px;
+                                                                font-weight: 760;
+                                                                horizontal-stretch: 1;
+                                                                overflow: elide;
+                                                            }
                                                             Text { text: article.words + "w"; color: #6e8bb5; font-size: 11px; vertical-alignment: center; }
                                                             Rectangle {
                                                                 width: 22px; height: 16px; border-radius: 4px;
-                                                                background: article.difficulty <= 1 ? #2d6a4f : article.difficulty == 2 ? #40916c : article.difficulty == 3 ? #e9c46a : article.difficulty == 4 ? #e76f51 : #d62828;
-                                                                Text { text: article.difficulty; color: article.difficulty <= 2 ? white : article.difficulty == 3 ? #1a1a2e : white; font-size: 10px; font-weight: 800; horizontal-alignment: center; vertical-alignment: center; }
+                                                                background: article.difficulty <= 1 ? #2d6a4f :
+                                                                    article.difficulty == 2 ? #40916c :
+                                                                    article.difficulty == 3 ? #e9c46a :
+                                                                    article.difficulty == 4 ? #e76f51 : #d62828;
+                                                                Text {
+                                                                    text: article.difficulty;
+                                                                    color: article.difficulty <= 2 ? white :
+                                                                        article.difficulty == 3 ? #1a1a2e : white;
+                                                                    font-size: 10px;
+                                                                    font-weight: 800;
+                                                                    horizontal-alignment: center;
+                                                                    vertical-alignment: center;
+                                                                }
                                                             }
                                                             Text { text: article.date; color: #6e8bb5; font-size: 11px; vertical-alignment: center; }
-                                                            if article.paywalled : Text { text: "Paywall"; color: #e76f51; font-size: 11px; font-weight: 700; vertical-alignment: center; }
-                                                            Text { text: article.uploaded ? "LingQ" : "Local"; color: article.uploaded ? #7ce2a4 : #9aa6be; font-size: 11px; vertical-alignment: center; }
+                                                            if article.paywalled : Text {
+                                                                text: "Paywall";
+                                                                color: #e76f51;
+                                                                font-size: 11px;
+                                                                font-weight: 700;
+                                                                vertical-alignment: center;
+                                                            }
+                                                            Text {
+                                                                text: article.uploaded ? "LingQ" : "Local";
+                                                                color: article.uploaded ? #7ce2a4 : #9aa6be;
+                                                                font-size: 11px;
+                                                                vertical-alignment: center;
+                                                            }
                                                         }
                                                         Text { text: article.section; color: #6e8bb5; font-size: root.article-density-index == 0 ? 10px : 11px; }
                                                     }
@@ -813,14 +960,27 @@ export component AppWindow inherits Window {
                                     spacing: 6px;
                                     HorizontalLayout {
                                         spacing: 6px;
-                                        Text { text: root.preview-has-article ? root.preview-title : "Reading pane"; color: white; font-size: 16px; font-weight: 800; wrap: word-wrap; horizontal-stretch: 1; }
+                                        Text {
+                                            text: root.preview-has-article ? root.preview-title : "Reading pane";
+                                            color: white;
+                                            font-size: 16px;
+                                            font-weight: 800;
+                                            wrap: word-wrap;
+                                            horizontal-stretch: 1;
+                                        }
                                         TextBtn {
                                             label: root.preview-wide ? "Narrow" : "Wide";
                                             text-color: #6b7a94;
                                             clicked => { root.toggle-preview-width(); }
                                         }
                                     }
-                                    Text { text: root.preview-has-article ? root.preview-meta : "Select a saved article to preview."; color: #9aa6be; wrap: word-wrap; font-size: 12px; }
+                                    Text {
+                                        text: root.preview-has-article ? root.preview-meta :
+                                            "Select a saved article to preview.";
+                                        color: #9aa6be;
+                                        wrap: word-wrap;
+                                        font-size: 12px;
+                                    }
                                     if root.preview-has-article : Button { text: "Open original"; clicked => { root.library-open-url(root.preview-url); } max-width: 140px; }
                                     Panel {
                                         panel-background: #1b2230;

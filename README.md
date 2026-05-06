@@ -1,8 +1,10 @@
 # Taz Reader
 
-Personal Windows desktop app for saving articles from `taz.de` into a local library and sending selected text to LingQ.
+Personal Windows desktop app for saving articles from `taz.de` into a local
+library and sending selected text to LingQ.
 
-This is a personal tool, not a polished product. I use it to save articles from [`taz.de`](https://taz.de) locally and sometimes push them into LingQ.
+This is a personal tool, not a polished product. I use it to save articles from
+[`taz.de`](https://taz.de) locally and sometimes push them into LingQ.
 
 This is mainly a Windows GUI app. It does not provide a supported CLI or a stable library API.
 
@@ -20,7 +22,8 @@ This is mainly a Windows GUI app. It does not provide a supported CLI or a stabl
 - Really only for Windows.
 - I mostly test it on my own machine.
 - The `taz.de` parser is based on current HTML patterns and may break when the site changes.
-- LingQ support is limited to the token, course list, upload, and status-sync flows exposed in the GUI.
+- LingQ support is limited to the token, course list, upload, and status-sync
+  flows exposed in the GUI.
 - Public builds are unsigned, so Windows may show an Unknown publisher or SmartScreen warning.
 
 ## Running It
@@ -49,7 +52,8 @@ cargo test -- --test-threads=1
 
 ## LingQ
 
-Taz Reader stores the LingQ token in the app data directory as a separate file, not inside `settings.json`.
+Taz Reader stores the LingQ token in the app data directory as a separate file,
+not inside `settings.json`.
 
 You can:
 
@@ -69,7 +73,8 @@ That folder contains:
 - settings and UI state
 - the saved LingQ token file
 
-Older installs that used `%LOCALAPPDATA%\taz_lingq_tool\` are migrated automatically on first run after the rename.
+Older installs that used `%LOCALAPPDATA%\taz_lingq_tool\` are migrated
+automatically on first run after the rename.
 
 The GUI includes an **Open library folder** action for jumping directly to this location.
 
@@ -91,7 +96,8 @@ Output:
 
 `installer\output\taz-reader-setup.exe`
 
-The installer script reads the version from `Cargo.toml`, builds the release binary, and passes the same version to Inno Setup.
+The installer script reads the version from `Cargo.toml`, builds the release
+binary, and passes the same version to Inno Setup.
 
 ## Release Script
 
@@ -105,7 +111,8 @@ To run the usual checks, build the installer, and optionally update the GitHub r
 .\scripts\release.ps1 -Publish
 ```
 
-The release script does not run `cargo fmt`. It:
+Run `cargo fmt --all -- --check` manually before a release. The release script
+does not run `cargo fmt`; it:
 
 - runs the test suite serially
 - runs strict Clippy checks
