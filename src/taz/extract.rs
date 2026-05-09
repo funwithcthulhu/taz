@@ -579,6 +579,47 @@ mod tests {
 </html>"#
     }
 
+    fn fixture_representative_taz_article() -> &'static str {
+        r#"<!DOCTYPE html>
+<html>
+<head>
+    <title>Protest gegen neue Verkehrspolitik | taz.de</title>
+    <meta property="og:title" content="Protest gegen neue Verkehrspolitik">
+    <meta name="description" content="Ein Bündnis fordert mehr Platz für Busse, Fahrräder und Fußwege in der Innenstadt.">
+</head>
+<body>
+<nav>
+    <a href="/Politik/">Politik</a>
+    <a href="/Kultur/">Kultur</a>
+</nav>
+<main>
+    <article>
+        <header>
+            <p class="kicker">Stadtentwicklung</p>
+            <h1>Protest gegen neue Verkehrspolitik</h1>
+        </header>
+        <p>Ein Bündnis aus Anwohnerinnen und Gewerbetreibenden fordert mehr Platz für Busse, Fahrräder und Fußwege in der Innenstadt.</p>
+        <aside class="related">
+            <p>Mehr zum Thema Verkehr und Klima in der Stadt finden Sie in unserem Dossier.</p>
+        </aside>
+        <figure>
+            <img src="/bild.jpg" alt="Demonstration vor dem Rathaus">
+            <figcaption>
+                <p>Foto: Archivbild mit Demonstrierenden vor dem Rathaus und Straßenbahnen.</p>
+            </figcaption>
+        </figure>
+        <h2>Viele Fragen offen</h2>
+        <p>Im Rathaus wird darüber gestritten, ob die Pläne schnell genug umgesetzt werden können und wer die Bauarbeiten bezahlt.</p>
+        <ul>
+            <li>Die Initiative will den Umbau der Hauptstraße noch in diesem Jahr beginnen lassen.</li>
+        </ul>
+        <p>Diesen Artikel teilen</p>
+    </article>
+</main>
+</body>
+</html>"#
+    }
+
     fn fixture_date_in_url() -> &'static str {
         "https://taz.de/Artikel/!2025/04/10/some-slug/"
     }
@@ -622,6 +663,30 @@ mod tests {
             "should preserve h2 as markdown heading"
         );
         assert!(!body.contains("<p>"), "should not contain raw HTML tags");
+    }
+
+    #[test]
+    fn representative_taz_article_shape_extracts_content_without_boilerplate() {
+        let doc = Html::parse_document(fixture_representative_taz_article());
+
+        let title = first_text(&doc, selectors::TITLE);
+        let body = extract_body(&doc).unwrap();
+
+        let expected_body = concat!(
+            "Ein Bündnis aus Anwohnerinnen und Gewerbetreibenden fordert mehr Platz für Busse, ",
+            "Fahrräder und Fußwege in der Innenstadt.\n\n",
+            "## Viele Fragen offen\n\n",
+            "Im Rathaus wird darüber gestritten, ob die Pläne schnell genug umgesetzt werden ",
+            "können und wer die Bauarbeiten bezahlt.\n\n",
+            "- Die Initiative will den Umbau der Hauptstraße noch in diesem Jahr beginnen lassen."
+        );
+        assert_eq!(title.as_deref(), Some("Protest gegen neue Verkehrspolitik"));
+        assert_eq!(body, expected_body);
+        assert_eq!(body.split_whitespace().count(), 53);
+        assert!(!body.contains("Politik"));
+        assert!(!body.contains("Dossier"));
+        assert!(!body.contains("Foto:"));
+        assert!(!body.contains("Diesen Artikel teilen"));
     }
 
     #[test]
