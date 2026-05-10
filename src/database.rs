@@ -1258,6 +1258,36 @@ mod tests {
     }
 
     #[test]
+    fn save_article_upserts_changed_slug_by_article_key() {
+        let db = Database::open(Path::new(":memory:")).unwrap();
+        let original = make_article("https://taz.de/Alter-Slug/!6175897/", "Older title");
+        let original_id = db.save_article(&original).unwrap();
+
+        let mut updated = make_article("https://taz.de/Neuer-Slug/!6175897/", "Newer title");
+        updated.subtitle = "Fresh subtitle".to_owned();
+        updated.clean_text = "Updated clean text.".to_owned();
+        updated.word_count = 3;
+        updated.fetched_at = "2025-01-16T10:00:00Z".to_owned();
+
+        let updated_id = db.save_article(&updated).unwrap();
+        assert_eq!(original_id, updated_id);
+
+        let stored = db.get_article(original_id).unwrap().unwrap();
+        assert_eq!(stored.article_key, "6175897");
+        assert_eq!(stored.url, "https://taz.de/Neuer-Slug/!6175897/");
+        assert_eq!(stored.title, "Newer title");
+        assert_eq!(stored.subtitle, "Fresh subtitle");
+        assert_eq!(stored.clean_text, "Updated clean text.");
+        assert_eq!(stored.word_count, 3);
+
+        let stats = db.get_stats().unwrap();
+        assert_eq!(stats.total_articles, 1);
+
+        let article_keys = db.get_all_article_keys().unwrap();
+        assert_eq!(article_keys, HashSet::from([String::from("6175897")]));
+    }
+
+    #[test]
     fn mark_uploaded_and_query() {
         let db = Database::open(Path::new(":memory:")).unwrap();
         let article = Article {
